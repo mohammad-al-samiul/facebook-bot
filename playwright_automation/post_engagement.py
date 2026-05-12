@@ -228,7 +228,7 @@ async def engage_with_next_posts(
     *,
     max_posts_per_pass: int = 5,
     like_probability: float = 0.70,
-    comment_probability: float = 0.40,
+    comment_probability: float = 0.75,
     pre_action_min_sec: float = 2.0,
     pre_action_max_sec: float = 5.0,
     inter_post_scroll: bool = True,
@@ -273,8 +273,9 @@ async def engage_with_next_posts(
         # Reading pause — a human looks at the post before reacting.
         await random_delay(pre_action_min_sec, pre_action_max_sec)
 
-        # ---- Like with 70% probability ------------------------------------
-        if random.random() < like_probability:
+        # ---- Like with `like_probability` --------------------------------
+        like_roll = random.random()
+        if like_roll < like_probability:
             try:
                 # Hard cap: don't let a single Like-button miss waste 30s.
                 await asyncio.wait_for(
@@ -289,15 +290,28 @@ async def engage_with_next_posts(
                 logger.warning("Like attempt timed out (>8s) for fp=%s", fp[:10])
             except Exception as exc:
                 logger.warning("Like attempt failed for fp=%s: %s", fp[:10], exc)
+        else:
+            logger.info(
+                "Like skipped by dice fp=%s (roll=%.2f >= %.2f)",
+                fp[:10], like_roll, like_probability,
+            )
 
-        # ---- AI comment with 40% probability ------------------------------
-        if random.random() < comment_probability:
+        # ---- AI comment with `comment_probability` -----------------------
+        comment_roll = random.random()
+        if comment_roll < comment_probability:
+            logger.info(
+                "Commenting on post fp=%s (roll=%.2f < %.2f) — asking Gemini…",
+                fp[:10], comment_roll, comment_probability,
+            )
             try:
                 comment_text = await get_ai_comment(text)
+                logger.info(
+                    "AI comment for fp=%s: %r", fp[:10], comment_text,
+                )
                 # comment_on_post handles scroll-to + human-paced typing internally.
                 posted = await asyncio.wait_for(
                     comment_on_post(page, post, comment_text),
-                    timeout=35.0,
+                    timeout=45.0,
                 )
                 if posted:
                     result.commented = True
@@ -306,11 +320,20 @@ async def engage_with_next_posts(
                     logger.info("Commented on post fp=%s with %r", fp[:10], comment_text)
                     await random_delay(1.5, 3.2)
                 else:
-                    logger.info("Comment skipped (no editor located) fp=%s", fp[:10])
+                    logger.warning(
+                        "Comment NOT submitted for fp=%s (typed=%r) — "
+                        "comment box may have been hidden or submit failed",
+                        fp[:10], comment_text,
+                    )
             except asyncio.TimeoutError:
-                logger.warning("Comment attempt timed out (>20s) for fp=%s", fp[:10])
+                logger.warning("Comment attempt timed out (>45s) for fp=%s", fp[:10])
             except Exception as exc:
                 logger.warning("Comment attempt failed for fp=%s: %s", fp[:10], exc)
+        else:
+            logger.info(
+                "Comment skipped by dice fp=%s (roll=%.2f >= %.2f)",
+                fp[:10], comment_roll, comment_probability,
+            )
 
         if result.liked or result.commented:
             state.interactions += 1

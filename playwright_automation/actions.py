@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import random
 import re
@@ -10,6 +11,8 @@ from enum import Enum
 from typing import Tuple
 
 from playwright.async_api import Locator, Page
+
+_btn_log = logging.getLogger("playwright_automation.actions.submit")
 
 
 class ReactionType(str, Enum):
@@ -79,7 +82,25 @@ _COMMENT_BOX_LABELS: tuple[str, ...] = (
 # Submit button labels — clicked after typing if the editor doesn't accept
 # Enter as a "post" signal (common on mobile FB). Includes the literal
 # button labels AND aria-label values FB attaches to the submit icon.
+#
+# IMPORTANT: keep the most-specific "Post a comment" style aria-labels at
+# the TOP so they get matched first. Generic "Post" / "Comment" / "Reply"
+# can also appear on the editor entry button (the thing you click to OPEN
+# the composer), which is NOT the submit button. The "Post a comment" /
+# "Posting komentar" / etc. labels only appear on the actual icon submit.
 _COMMENT_SUBMIT_LABELS: tuple[str, ...] = (
+    # Highest-confidence (these are ONLY on the real submit icon button)
+    "Post a comment", "Post comment", "Send comment", "Submit comment",
+    "Reply to comment",
+    "Posting komentar", "Posting komentar publik",   # id_ID
+    "Een reactie plaatsen", "Reactie plaatsen",      # nl_NL
+    "মন্তব্য পোস্ট করুন", "কমেন্ট পোস্ট করুন",       # bn
+    "Publicar comentario", "Publicar un comentario", # es
+    "Publier le commentaire", "Publier un commentaire",  # fr
+    "Pubblica commento", "Pubblica un commento",     # it
+    "コメントを投稿", "コメントを送信",                    # ja
+    "Publicar comentário",                           # pt
+    # Generic single-word fallbacks
     "Post", "Comment", "Reply", "Send", "Submit",
     "Kirim", "Posting", "Kirim komentar",      # id_ID
     "Plaatsen", "Reageer", "Verzenden",        # nl_NL
@@ -88,6 +109,32 @@ _COMMENT_SUBMIT_LABELS: tuple[str, ...] = (
     "Publier", "Commenter", "Envoyer",         # fr
     "Pubblica", "Invia",                       # it
     "送信", "投稿",                              # ja
+)
+
+# These aria-label values can ONLY appear on the actual icon submit button
+# (they never appear on the textarea / composer-open button). We try these
+# first via a single fast selector before falling back to broader regex.
+_COMMENT_SUBMIT_PRIORITY_LABELS: tuple[str, ...] = (
+    "Post a comment",
+    "Post comment",
+    "Send comment",
+    "Submit comment",
+    "Reply to comment",
+    "Posting komentar",
+    "Posting komentar publik",
+    "Een reactie plaatsen",
+    "Reactie plaatsen",
+    "মন্তব্য পোস্ট করুন",
+    "কমেন্ট পোস্ট করুন",
+    "Publicar comentario",
+    "Publicar un comentario",
+    "Publier le commentaire",
+    "Publier un commentaire",
+    "Pubblica commento",
+    "Pubblica un commento",
+    "Publicar comentário",
+    "コメントを投稿",
+    "コメントを送信",
 )
 
 # Comment text pool — Indonesian heavy (since most accounts are id_ID),
@@ -491,37 +538,109 @@ async def _submit_comment(page: Page, box: Locator, original_text: str) -> bool:
 
 
 async def _click_submit_button(page: Page, *, timeout_sec: float) -> bool:
-    """Find and click the most likely comment-submit button. Returns True on click."""
+    """Find and click the most likely comment-submit button. Returns True on click.
+
+    Strategy:
+        1. FAST PATH — scan the high-confidence ``aria-label`` matches
+           (e.g. ``aria-label="Post a comment"``) page-wide. Multiple
+           posts can have submit buttons in the DOM, so we walk them and
+           pick the FIRST VISIBLE one.
+        2. SLOW PATH — fall back to the broader multilingual regex match
+           via :func:`_comment_submit_button`.
+    """
+    # ---- FAST PATH: walk priority aria-label matches, click first visible.
+    priority_css = ", ".join(
+        f'[aria-label="{lbl}"][role="button"]'
+        for lbl in _COMMENT_SUBMIT_PRIORITY_LABELS
+    )
+    priority_loc = page.locator(priority_css)
+    try:
+        total = await priority_loc.count()
+    except Exception:
+        total = 0
+    if total:
+        for i in range(min(total, 8)):
+            cand = priority_loc.nth(i)
+            try:
+                if not await cand.is_visible(timeout=400):
+                    continue
+            except Exception:
+                continue
+            try:
+                aria = await cand.get_attribute("aria-label")
+            except Exception:
+                aria = None
+            try:
+                await asyncio.wait_for(cand.click(timeout=2_500), timeout=3.5)
+                _btn_log.info(
+                    "Clicked comment-submit button (aria-label=%r, index=%d/%d)",
+                    aria, i, total,
+                )
+                return True
+            except Exception as exc:
+                _btn_log.debug(
+                    "Priority submit click failed (aria-label=%r): %s", aria, exc,
+                )
+                continue
+
+    # ---- SLOW PATH: broader regex fallback.
     submit = _comment_submit_button(page)
     try:
         visible = await submit.is_visible(timeout=int(timeout_sec * 1000))
     except Exception:
         visible = False
     if not visible:
+        _btn_log.info("No comment-submit button visible (priority+fallback)")
         return False
+    try:
+        aria = await submit.get_attribute("aria-label")
+    except Exception:
+        aria = None
     try:
         # Constrained click — never let a single click stall longer than 4s.
         await asyncio.wait_for(submit.click(timeout=3_000), timeout=4.0)
+        _btn_log.info("Clicked comment-submit button (fallback path, aria-label=%r)", aria)
         return True
-    except Exception:
+    except Exception as exc:
+        _btn_log.warning("Fallback submit click failed (aria-label=%r): %s", aria, exc)
         return False
 
 
 def _comment_submit_button(page: Page) -> Locator:
     """Locate a clickable comment-submit button via multilingual labels.
 
-    The big regex on ``aria-label`` / accessible name is one Playwright
-    selector branch (fast), as opposed to a 50-branch ``.or_()`` chain which
-    Playwright evaluates serially and is too slow for tight timeouts.
+    Priority order:
+
+    1. Direct CSS selector on the high-confidence ``aria-label`` values
+       (e.g. ``[aria-label="Post a comment"][role="button"]``). This is
+       the FAST PATH that handles mobile FB's icon-only submit button —
+       confirmed via the actual rendered HTML.
+    2. ``get_by_role`` accessible-name regex over the broader label list.
+    3. ``role=button`` element whose own text matches the label regex.
+    4. ``get_by_label`` regex (matches aria-label as a fallback).
+
+    The high-priority CSS hit is one Playwright selector (very fast),
+    avoiding the 50-branch ``.or_()`` chain which is evaluated serially.
     """
+    # FAST PATH: exact aria-label hits on the submit-only labels.
+    # Build a single CSS list so Playwright resolves it in one query.
+    priority_css = ", ".join(
+        f'[aria-label="{lbl}"][role="button"]'
+        for lbl in _COMMENT_SUBMIT_PRIORITY_LABELS
+    )
+    priority = page.locator(priority_css).first
+
+    # SLOW PATH: regex-based fallbacks for less-common label variants.
     name_re = _build_label_pattern(_COMMENT_SUBMIT_LABELS)
     label_alt = "|".join(re.escape(lbl) for lbl in _COMMENT_SUBMIT_LABELS)
     aria_re = re.compile(rf"^\s*({label_alt})\s*$", re.I)
-    return (
+    fallback = (
         page.get_by_role("button", name=name_re)
         .or_(page.locator("[role='button']").filter(has_text=name_re))
         .or_(page.get_by_label(aria_re))
     ).first
+
+    return priority.or_(fallback).first
 
 
 async def react_to_post(

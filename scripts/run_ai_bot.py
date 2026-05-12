@@ -13,8 +13,11 @@ Flow:
 3. Enter the main loop:
    - human-like scroll between posts
    - read post text
-   - Like with 70% probability, AI-generated Gemini comment with 40%
-     probability (Bangla for Bangla posts, English for English posts)
+   - Like with 70% probability, AI-generated Gemini comment with 75%
+     probability (Bangla for Bangla posts, English for English posts).
+     The Gemini prompt is tone-aware (religious / funny / sad / news /
+     food / travel / love / promo / neutral) so comments stay relevant
+     to the post's content.
    - never interact with the same post twice in one session
 4. After every 5 *successful* interactions take a 5-10 minute cooldown
    ("the user is taking a break").
@@ -562,7 +565,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Use desktop UA + viewport (may trigger captcha)",
     )
     p.add_argument("--like-chance", type=float, default=0.70, help="Probability of Like per post (0..1)")
-    p.add_argument("--comment-chance", type=float, default=0.40, help="Probability of AI comment per post (0..1)")
+    p.add_argument("--comment-chance", type=float, default=0.75, help="Probability of AI comment per post (0..1)")
     p.add_argument("--max-posts-per-pass", type=int, default=5, help="Max posts to process before re-scrolling")
     p.add_argument("--cooldown-after", type=int, default=5, help="Take a break after this many interactions")
     p.add_argument("--cooldown-min-min", type=float, default=5.0, help="Cooldown minimum minutes")
