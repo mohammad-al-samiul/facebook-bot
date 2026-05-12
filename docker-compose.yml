@@ -1,0 +1,12 @@
+# Local MongoDB for bot fleet (development)
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_bot_data:/data/db
+
+volumes:
+  mongo_bot_data:
