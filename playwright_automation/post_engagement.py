@@ -7,9 +7,10 @@ This module contains the high-level "process the next post" logic that:
 - Extracts the visible text snippet of each post (used both for AI prompts
   and for deduplication).
 - Skips any post we've already interacted with in this session.
-- Applies probabilistic reactions: a Like with ``like_probability``
-  (default 70%) and an AI-generated comment with ``comment_probability``
-  (default 40%).
+- Applies probabilistic reactions (Like / Love / Care / Haha / Wow / Sad /
+  Angry) with ``like_probability`` (default 70%), chosen from post text via
+  :func:`~playwright_automation.ai_comment.pick_reaction_for_post`, plus an
+  AI-generated comment with ``comment_probability`` (default 40%).
 - Returns a structured summary of what happened so callers can implement
   cooldowns / metrics on top.
 
@@ -34,7 +35,7 @@ from playwright_automation.actions import (
     random_delay,
     react_to_post,
 )
-from playwright_automation.ai_comment import get_ai_comment
+from playwright_automation.ai_comment import get_ai_comment, pick_reaction_for_post
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ class PostEngagementResult:
     fingerprint: str
     text_snippet: str
     liked: bool = False
+    """True when a feed reaction (any type) was applied."""
+    reaction_kind: str | None = None
     commented: bool = False
     comment_text: str | None = None
     skipped_reason: str | None = None
@@ -57,7 +60,7 @@ class SessionState:
 
     seen_fingerprints: set[str] = field(default_factory=set)
     interactions: int = 0
-    likes: int = 0
+    reactions: int = 0
     comments: int = 0
 
 
@@ -273,26 +276,36 @@ async def engage_with_next_posts(
         # Reading pause — a human looks at the post before reacting.
         await random_delay(pre_action_min_sec, pre_action_max_sec)
 
-        # ---- Like with `like_probability` --------------------------------
+        # ---- Feed reaction (Like / Love / Haha / …) with `like_probability`
         like_roll = random.random()
         if like_roll < like_probability:
+            reaction = pick_reaction_for_post(text, rng=random.Random())
+            timeout_sec = 14.0 if reaction != ReactionType.LIKE else 8.0
             try:
-                # Hard cap: don't let a single Like-button miss waste 30s.
                 await asyncio.wait_for(
-                    react_to_post(page, post, ReactionType.LIKE),
-                    timeout=8.0,
+                    react_to_post(page, post, reaction),
+                    timeout=timeout_sec,
                 )
                 result.liked = True
-                state.likes += 1
-                logger.info("Liked post fp=%s", fp[:10])
+                result.reaction_kind = reaction.value
+                state.reactions += 1
+                logger.info(
+                    "Reacted %s on post fp=%s",
+                    reaction.value,
+                    fp[:10],
+                )
                 await random_delay(1.2, 2.6)
             except asyncio.TimeoutError:
-                logger.warning("Like attempt timed out (>8s) for fp=%s", fp[:10])
+                logger.warning(
+                    "Reaction attempt timed out (>%.0fs) for fp=%s",
+                    timeout_sec,
+                    fp[:10],
+                )
             except Exception as exc:
-                logger.warning("Like attempt failed for fp=%s: %s", fp[:10], exc)
+                logger.warning("Reaction attempt failed for fp=%s: %s", fp[:10], exc)
         else:
             logger.info(
-                "Like skipped by dice fp=%s (roll=%.2f >= %.2f)",
+                "Reaction skipped by dice fp=%s (roll=%.2f >= %.2f)",
                 fp[:10], like_roll, like_probability,
             )
 

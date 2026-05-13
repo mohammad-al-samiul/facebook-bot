@@ -299,10 +299,10 @@ async def _activity_loop(
             empty_passes = 0
 
         log.info(
-            "Pass done: visited=%d new_interactions=%d (session likes=%d comments=%d total=%d)",
+            "Pass done: visited=%d new_interactions=%d (session reactions=%d comments=%d total=%d)",
             len(results),
             new_interactions,
-            state.likes,
+            state.reactions,
             state.comments,
             state.interactions,
         )

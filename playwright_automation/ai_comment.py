@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import ssl
 from typing import Final
 
 import httpx
+
+from playwright_automation.actions import ReactionType
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,183 @@ def _detect_tone(text: str) -> str:
         if any(k in lower for k in kws):
             return tone
     return "neutral"
+
+
+_ANGRY_HINTS: Final[tuple[str, ...]] = (
+    "disgusting",
+    "outrage",
+    "furious",
+    "horrible",
+    "shame on",
+    "how dare",
+    "messed up",
+    "wtf is wrong",
+    "so angry",
+    "this is evil",
+    "hate this",
+    "unacceptable",
+    "scandal",
+    "corrupt",
+    "😡",
+    "🤬",
+)
+
+
+def _looks_outraged(text: str) -> bool:
+    lower = (text or "").lower()
+    return any(h in lower for h in _ANGRY_HINTS)
+
+
+def _weighted_reaction(
+    rng: random.Random,
+    choices: tuple[tuple[ReactionType, float], ...],
+) -> ReactionType:
+    """Pick a reaction using non-negative weights (any positive scale)."""
+    total = sum(w for _, w in choices)
+    if total <= 0:
+        return ReactionType.LIKE
+    x = rng.random() * total
+    for rt, w in choices:
+        x -= w
+        if x <= 0:
+            return rt
+    return choices[-1][0]
+
+
+def pick_reaction_for_post(
+    text: str,
+    rng: random.Random | None = None,
+) -> ReactionType:
+    """
+    Choose a feed reaction aligned with post tone, with randomness so the
+    bot does not always use the same emoji family.
+
+    Drives Like / Love / Care / Haha / Wow / Sad / Angry via
+    :func:`~playwright_automation.actions.react_to_post`.
+    """
+    r = rng if rng is not None else random.Random()
+    tone = _detect_tone(text)
+    mad = _looks_outraged(text)
+
+    if tone == "funny":
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.HAHA, 62),
+                (ReactionType.WOW, 14),
+                (ReactionType.LIKE, 16),
+                (ReactionType.LOVE, 8),
+            ),
+        )
+    if tone == "sad":
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.SAD, 38),
+                (ReactionType.CARE, 47),
+                (ReactionType.LIKE, 15),
+            ),
+        )
+    if tone == "love":
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.LOVE, 58),
+                (ReactionType.CARE, 27),
+                (ReactionType.LIKE, 15),
+            ),
+        )
+    if tone == "achievement":
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.LOVE, 36),
+                (ReactionType.LIKE, 30),
+                (ReactionType.CARE, 17),
+                (ReactionType.WOW, 17),
+            ),
+        )
+    if tone == "food":
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.LOVE, 28),
+                (ReactionType.HAHA, 22),
+                (ReactionType.LIKE, 35),
+                (ReactionType.WOW, 15),
+            ),
+        )
+    if tone == "news":
+        if mad:
+            return _weighted_reaction(
+                r,
+                (
+                    (ReactionType.ANGRY, 35),
+                    (ReactionType.WOW, 25),
+                    (ReactionType.SAD, 15),
+                    (ReactionType.LIKE, 25),
+                ),
+            )
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.WOW, 28),
+                (ReactionType.LIKE, 52),
+                (ReactionType.CARE, 10),
+                (ReactionType.SAD, 10),
+            ),
+        )
+    if tone == "travel":
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.WOW, 38),
+                (ReactionType.LOVE, 27),
+                (ReactionType.LIKE, 35),
+            ),
+        )
+    if tone == "promo":
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.LIKE, 72),
+                (ReactionType.HAHA, 15),
+                (ReactionType.WOW, 13),
+            ),
+        )
+    if tone == "religious":
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.LOVE, 22),
+                (ReactionType.CARE, 30),
+                (ReactionType.LIKE, 48),
+            ),
+        )
+    # neutral (+ optional outrage tilt)
+    if mad:
+        return _weighted_reaction(
+            r,
+            (
+                (ReactionType.ANGRY, 28),
+                (ReactionType.LIKE, 33),
+                (ReactionType.WOW, 15),
+                (ReactionType.HAHA, 12),
+                (ReactionType.LOVE, 12),
+            ),
+        )
+    return _weighted_reaction(
+        r,
+        (
+            (ReactionType.LIKE, 30),
+            (ReactionType.LOVE, 20),
+            (ReactionType.HAHA, 18),
+            (ReactionType.WOW, 12),
+            (ReactionType.CARE, 10),
+            (ReactionType.SAD, 5),
+            (ReactionType.ANGRY, 5),
+        ),
+    )
 
 
 def _build_prompt(snippet: str, lang: str, tone: str) -> str:
@@ -345,4 +525,4 @@ async def get_ai_comment(post_text: str, *, timeout: float = 12.0) -> str:
     return text
 
 
-__all__ = ["get_ai_comment"]
+__all__ = ["get_ai_comment", "pick_reaction_for_post"]

@@ -18,11 +18,18 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from playwright_automation.actions import ReactionType, click_feed_tab, random_delay
+from playwright_automation.actions import click_feed_tab, random_delay
 from playwright_automation.bot_core import BaseBot
 from playwright_automation.facebook_graph import AccountRestrictedError, raise_if_account_restricted
 from playwright_automation.facebook_login import ensure_facebook_logged_in
-from playwright_automation.mongo_service import count_actions_since, fetch_bots_by_account_ids, fetch_enabled_bots, get_database, log_bot_event
+from playwright_automation.ai_comment import pick_reaction_for_post
+from playwright_automation.mongo_service import (
+    count_actions_since,
+    fetch_bots_by_account_ids,
+    fetch_enabled_bots,
+    get_database,
+    log_bot_event,
+)
 from playwright_automation.scheduling import initial_stagger_seconds, interruptible_sleep, next_action_delay_seconds, seconds_until_next_active_slot
 
 logger = logging.getLogger(__name__)
@@ -88,7 +95,7 @@ def _utc_start_of_today() -> datetime:
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-async def _safe_count(db, *, account_id: str, action: str) -> int:
+async def _safe_count(db, *, account_id: str, action: str | list[str]) -> int:
     """``count_actions_since`` with a hard timeout so Mongo Primary outage doesn't hang us."""
     try:
         return await asyncio.wait_for(
@@ -124,14 +131,14 @@ async def _try_like_one(
     rng: random.Random,
     log: logging.Logger,
 ) -> bool:
-    """Pick a visible post and apply LIKE; return True on success."""
+    """Pick a visible post and apply a tone-aligned reaction; return True on success."""
     from playwright_automation import actions as act
 
     try:
         articles = page.locator('[role="article"]')
         count = await articles.count()
         if count == 0:
-            log.debug("No [role=article] found for like")
+            log.debug("No [role=article] found for reaction")
             return False
         idx = rng.randint(0, min(count - 1, 8))
         post = articles.nth(idx)
@@ -140,18 +147,31 @@ async def _try_like_one(
         except Exception:
             pass
         await act.random_delay(0.4, 1.1)
-        await act.react_to_post(page, post, act.ReactionType.LIKE)
-        log.info("Like clicked (post idx=%d)", idx)
+        text = ""
+        try:
+            text = (await post.inner_text(timeout=2_500) or "").strip()
+        except Exception:
+            text = ""
+        reaction = pick_reaction_for_post(text, rng)
+        timeout_sec = 14.0 if reaction != act.ReactionType.LIKE else 8.0
+        await asyncio.wait_for(
+            act.react_to_post(page, post, reaction),
+            timeout=timeout_sec,
+        )
+        log.info("Reaction %s (post idx=%d)", reaction.value, idx)
         await _safe_log_event(
             db,
             account_id=account_id,
             level="info",
-            message="Post like",
-            meta={"action": "like"},
+            message=f"Post reaction ({reaction.value})",
+            meta={"action": "react", "reaction": reaction.value},
         )
         return True
+    except asyncio.TimeoutError:
+        log.warning("Reaction attempt timed out")
+        return False
     except Exception as exc:
-        log.warning("Like attempt failed: %s", exc)
+        log.warning("Reaction attempt failed: %s", exc)
         return False
 
 
@@ -207,7 +227,7 @@ async def _engagement_actions(
     log: logging.Logger,
 ) -> None:
     """
-    Per-cycle engagement: like + (occasionally) comment, with daily caps that
+    Per-cycle engagement: varied feed reactions + (occasionally) comment, with daily caps that
     scale by warmup vs normal mode. All MongoDB calls are timeout-guarded so a
     Primary outage doesn't stall the browser activity.
     """
@@ -219,11 +239,11 @@ async def _engagement_actions(
         max_likes, max_comments = 20, 8
 
     if rng.random() < like_chance:
-        likes_today = await _safe_count(db, account_id=account_id, action="like")
+        likes_today = await _safe_count(db, account_id=account_id, action=["like", "react"])
         if likes_today < max_likes:
             await _try_like_one(page, account_id, db, rng=rng, log=log)
         else:
-            log.debug("Daily like cap reached (%d)", likes_today)
+            log.debug("Daily reaction cap reached (%d)", likes_today)
 
     if rng.random() < comment_chance:
         comments_today = await _safe_count(db, account_id=account_id, action="comment")

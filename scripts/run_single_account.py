@@ -9,7 +9,7 @@ Default target account is ``100001514018857`` / ``123456`` (matches the row in
 Activities performed in a continuous loop:
 
 - Human-like scrolling of the feed (curved mouse paths, variable speed).
-- Occasional ``Like`` reaction on a visible post (low probability).
+- Occasional feed reaction (Like / Love / Haha / …) on a visible post (low probability).
 - Periodic light pauses ("thinking time") to avoid robotic cadence.
 - Optional drift visits to the own profile / notifications page.
 
@@ -44,6 +44,7 @@ from playwright_automation.actions import (  # noqa: E402
     react_to_post,
     random_delay,
 )
+from playwright_automation.ai_comment import pick_reaction_for_post  # noqa: E402
 from playwright_automation.bot_core import BaseBot  # noqa: E402
 from playwright_automation.facebook_login import (  # noqa: E402
     looks_like_checkpoint,
@@ -160,7 +161,7 @@ async def _looks_logged_in(page: Page) -> bool:
 
 
 async def _try_random_like(page: Page, *, log_: logging.Logger) -> bool:
-    """Try to Like one visible post; return True if a click happened."""
+    """Try to apply a tone-aligned reaction on one visible post; return True if it ran."""
     try:
         posts = page.locator('[role="article"]')
         count = await posts.count()
@@ -169,11 +170,21 @@ async def _try_random_like(page: Page, *, log_: logging.Logger) -> bool:
         post = posts.nth(random.randint(0, min(count - 1, 6)))
         if not await post.is_visible(timeout=3000):
             return False
-        await react_to_post(page, post, ReactionType.LIKE)
-        log_.info("Liked a post")
+        text = ""
+        try:
+            text = (await post.inner_text(timeout=2500) or "").strip()
+        except Exception:
+            text = ""
+        reaction = pick_reaction_for_post(text, random.Random())
+        timeout_sec = 14.0 if reaction != ReactionType.LIKE else 8.0
+        await asyncio.wait_for(react_to_post(page, post, reaction), timeout=timeout_sec)
+        log_.info("Reacted with %s", reaction.value)
         return True
+    except asyncio.TimeoutError:
+        log_.debug("Reaction attempt timed out")
+        return False
     except Exception as exc:
-        log_.debug("Like attempt skipped: %s", exc)
+        log_.debug("Reaction attempt skipped: %s", exc)
         return False
 
 

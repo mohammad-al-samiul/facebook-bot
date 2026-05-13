@@ -58,15 +58,19 @@ async def count_actions_since(
     db: AsyncIOMotorDatabase,
     *,
     account_id: str,
-    action: str,
+    action: str | list[str],
     since: datetime,
     collection: str = "bot_logs",
 ) -> int:
     """Count log entries tagged with ``meta.action`` for warmup / rate limits."""
+    if isinstance(action, str):
+        action_filter: Any = action
+    else:
+        action_filter = {"$in": action}
     return await db[collection].count_documents(
         {
             "account_id": account_id,
             "created_at": {"$gte": since},
-            "meta.action": action,
+            "meta.action": action_filter,
         },
     )
