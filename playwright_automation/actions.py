@@ -345,6 +345,106 @@ async def human_type(
         await asyncio.sleep(delay)
 
 
+# ---------------------------------------------------------------------------
+# Mobile FB bottom-navigation labels for the "feed" / "home" tab.
+# The user observed ``aria-label="feed, 1 of 6"`` on mobile FB. The label is
+# locale-sensitive and the count ("1 of N") can change. We match the leading
+# token, case-insensitive, with a few common localised forms.
+# ---------------------------------------------------------------------------
+_FEED_TAB_LABELS: tuple[str, ...] = (
+    "feed",
+    "home",
+    "news feed",
+    "beranda",        # id_ID  (home)
+    "kabar",          # id_ID  (news/feed)
+    "umpan berita",   # id_ID  (news feed)
+    "ফিড",            # bn     (feed)
+    "হোম",            # bn     (home)
+    "নিউজ ফিড",       # bn     (news feed)
+)
+
+
+async def click_feed_tab(
+    page: Page,
+    *,
+    timeout_ms: int = 8_000,
+    log: logging.Logger | None = None,
+) -> bool:
+    """
+    Click the mobile Facebook "feed" tab once.
+
+    Targets the bottom-navigation tab that carries
+    ``role="tab"`` + ``aria-label="feed, 1 of N"`` (and its localised
+    variants). Falls back to the desktop ``Home`` navigation link so the
+    function is safe to call regardless of device profile.
+
+    Behaviour:
+
+    - Returns ``True`` as soon as one click goes through.
+    - Returns ``False`` if no candidate became visible within ``timeout_ms``.
+    - Never raises for the "tab not found" path so callers can treat it as a
+      best-effort humanising action right after login.
+    """
+    logger_ = log or logging.getLogger("playwright_automation.actions.feed_tab")
+
+    per_step_ms = max(800, timeout_ms // (len(_FEED_TAB_LABELS) + 2))
+
+    # 1) High-confidence: role=tab whose aria-label STARTS with a known feed label.
+    for lbl in _FEED_TAB_LABELS:
+        sel = f'[role="tab"][aria-label^="{lbl}" i]'
+        loc = page.locator(sel).first
+        try:
+            if not await loc.is_visible(timeout=per_step_ms):
+                continue
+        except Exception:
+            continue
+        try:
+            await asyncio.wait_for(human_click(page, loc), timeout=6.0)
+            logger_.info("Clicked feed tab (selector=%r)", sel)
+            return True
+        except Exception as exc:
+            logger_.debug("Feed tab click failed for %r: %s", sel, exc)
+
+    # 2) Broader role=tab fallback — aria-label CONTAINS the label.
+    for lbl in _FEED_TAB_LABELS:
+        sel = f'[role="tab"][aria-label*="{lbl}" i]'
+        loc = page.locator(sel).first
+        try:
+            if not await loc.is_visible(timeout=per_step_ms):
+                continue
+        except Exception:
+            continue
+        try:
+            await asyncio.wait_for(human_click(page, loc), timeout=6.0)
+            logger_.info("Clicked feed tab via contains-match (selector=%r)", sel)
+            return True
+        except Exception as exc:
+            logger_.debug("Feed tab contains-match click failed for %r: %s", sel, exc)
+
+    # 3) Desktop / responsive fallback: nav Home link.
+    desktop_fallbacks = (
+        '[role="navigation"] a[aria-label="Home"]',
+        'a[aria-label="Home"][role="link"]',
+        'a[aria-label="Home"]',
+    )
+    for sel in desktop_fallbacks:
+        loc = page.locator(sel).first
+        try:
+            if not await loc.is_visible(timeout=per_step_ms):
+                continue
+        except Exception:
+            continue
+        try:
+            await asyncio.wait_for(human_click(page, loc), timeout=6.0)
+            logger_.info("Clicked Home nav as feed-tab fallback (selector=%r)", sel)
+            return True
+        except Exception as exc:
+            logger_.debug("Home nav fallback click failed for %r: %s", sel, exc)
+
+    logger_.info("Feed tab not located on this page — skipping click")
+    return False
+
+
 def _normalize_reaction(reaction_type: ReactionType | str) -> tuple[str, str]:
     key = reaction_type.value if isinstance(reaction_type, ReactionType) else str(reaction_type)
     key_l = key.strip().lower()
@@ -383,6 +483,9 @@ async def comment_on_post(
 
     Returns ``True`` if the comment box was located and text was typed; ``False``
     if the UI couldn't be navigated (e.g., comment button not visible, no box).
+
+    When ``submit=True`` and Facebook accepts the comment, mobile full-screen
+    composers get a **Back** toolbar tap so the feed is focused again.
     """
     post = _resolve_locator(page, post_element)
     try:
@@ -484,6 +587,78 @@ async def comment_on_post(
     return True
 
 
+# Mobile FB often opens comments in a full-screen layer with a toolbar
+# ``role="button"`` + ``aria-label="Back"``. After a successful post the
+# automation must tap Back so the main feed is active again.
+_BACK_AFTER_COMMENT_ARIA: tuple[str, ...] = (
+    "Back",
+    "Kembali",    # id_ID
+    "Terug",      # nl_NL
+    "Retour",     # fr (some builds)
+    "Indietro",   # it_IT
+    "Atrás",      # es
+    "Zurück",     # de
+    "পিছনে",      # bn
+    "वापस",       # hi
+)
+
+
+async def dismiss_mobile_comment_surface_after_post(
+    page: Page,
+    *,
+    log: logging.Logger | None = None,
+) -> bool:
+    """
+    If the mobile comment composer shows a **Back** control, click it once.
+
+    Call this only after a comment was actually submitted (editor cleared).
+    No-op when Back is not visible (e.g. inline desktop composer).
+    """
+    logger_ = log or logging.getLogger("playwright_automation.actions.comment_back")
+    await random_delay(0.35, 0.75)
+
+    per_ms = 450
+    for lbl in _BACK_AFTER_COMMENT_ARIA:
+        loc = page.locator(f'[role="button"][aria-label="{lbl}"]').first
+        try:
+            if not await loc.is_visible(timeout=per_ms):
+                continue
+        except Exception:
+            continue
+        try:
+            await asyncio.wait_for(human_click(page, loc), timeout=5.0)
+        except Exception:
+            try:
+                await loc.click(timeout=2_500)
+            except Exception as exc:
+                logger_.debug("Back click failed (aria-label=%r): %s", lbl, exc)
+                continue
+        logger_.info("Closed comment composer via Back (%r)", lbl)
+        await random_delay(0.45, 0.95)
+        return True
+
+    # Accessible name "Back" without relying on exact aria string.
+    try:
+        role_loc = page.get_by_role("button", name=re.compile(r"^\s*back\s*$", re.I)).first
+        if await role_loc.is_visible(timeout=500):
+            try:
+                await asyncio.wait_for(human_click(page, role_loc), timeout=5.0)
+            except Exception:
+                await role_loc.click(timeout=2_500)
+            logger_.info("Closed comment composer via role=button name=Back")
+            await random_delay(0.45, 0.95)
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+async def _return_after_successful_comment_submit(page: Page) -> bool:
+    await dismiss_mobile_comment_surface_after_post(page)
+    return True
+
+
 async def _submit_comment(page: Page, box: Locator, original_text: str) -> bool:
     """
     Try several submission strategies in order and return True as soon as
@@ -504,7 +679,7 @@ async def _submit_comment(page: Page, box: Locator, original_text: str) -> bool:
     if await _click_submit_button(page, timeout_sec=2.5):
         await random_delay(0.8, 1.5)
         if await _editor_empty():
-            return True
+            return await _return_after_successful_comment_submit(page)
 
     # Strategy 2: Ctrl+Enter (some FB editors require the keyboard shortcut).
     try:
@@ -517,7 +692,7 @@ async def _submit_comment(page: Page, box: Locator, original_text: str) -> bool:
         pass
     await random_delay(0.6, 1.0)
     if await _editor_empty():
-        return True
+        return await _return_after_successful_comment_submit(page)
 
     # Strategy 3: plain Enter (works in desktop / responsive FB editors).
     try:
@@ -526,13 +701,14 @@ async def _submit_comment(page: Page, box: Locator, original_text: str) -> bool:
         pass
     await random_delay(0.6, 1.0)
     if await _editor_empty():
-        return True
+        return await _return_after_successful_comment_submit(page)
 
     # Strategy 4: re-check for a submit button that may have become enabled
     # only after the editor was marked dirty.
     if await _click_submit_button(page, timeout_sec=2.0):
         await random_delay(0.8, 1.5)
-        return await _editor_empty()
+        if await _editor_empty():
+            return await _return_after_successful_comment_submit(page)
 
     return False
 

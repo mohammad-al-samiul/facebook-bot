@@ -37,7 +37,13 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from playwright_automation.actions import ReactionType, human_scroll, react_to_post, random_delay  # noqa: E402
+from playwright_automation.actions import (  # noqa: E402
+    ReactionType,
+    click_feed_tab,
+    human_scroll,
+    react_to_post,
+    random_delay,
+)
 from playwright_automation.bot_core import BaseBot  # noqa: E402
 from playwright_automation.facebook_login import (  # noqa: E402
     looks_like_checkpoint,
@@ -397,6 +403,16 @@ async def _run(args: argparse.Namespace) -> None:
 
         if stop.is_set():
             return
+
+        # Post-login: one human-style tap on the mobile FB "feed" tab
+        # (or the desktop Home nav as a fallback). Mirrors a real user
+        # opening the app and pressing Home before scrolling.
+        log.info("Clicking the feed tab once before starting activity...")
+        try:
+            if await click_feed_tab(page, log=log):
+                await random_delay(1.4, 2.6)
+        except Exception as exc:
+            log.warning("Feed tab click skipped due to error: %s", exc)
 
         log.info("Starting human-like activity. Press Ctrl+C to stop.")
         await _activity_loop(

@@ -18,7 +18,7 @@ from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorClient
 
-from playwright_automation.actions import ReactionType
+from playwright_automation.actions import ReactionType, click_feed_tab, random_delay
 from playwright_automation.bot_core import BaseBot
 from playwright_automation.facebook_graph import AccountRestrictedError, raise_if_account_restricted
 from playwright_automation.facebook_login import ensure_facebook_logged_in
@@ -307,6 +307,16 @@ async def bot_worker(
                 )
         await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=90_000)
         await raise_if_account_restricted(page)
+
+        # First post-login human action: tap the mobile FB "feed" tab once
+        # (aria-label="feed, 1 of N"). Falls back to the desktop Home nav
+        # link inside ``click_feed_tab``. Best-effort — failures are logged
+        # but do not stop the bot.
+        try:
+            if await click_feed_tab(page, log=log):
+                await random_delay(1.4, 2.6)
+        except Exception as exc:
+            log.warning("Initial feed tab click skipped: %s", exc)
 
         log.info("Bot initialized, entering main loop")
 

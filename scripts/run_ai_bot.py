@@ -51,7 +51,7 @@ if str(_ROOT) not in sys.path:
 # Load .env before importing modules that read environment variables.
 load_dotenv(_ROOT / ".env", override=False)
 
-from playwright_automation.actions import human_like_scroll, random_delay  # noqa: E402
+from playwright_automation.actions import click_feed_tab, human_like_scroll, random_delay  # noqa: E402
 from playwright_automation.bot_core import BaseBot  # noqa: E402
 from playwright_automation.facebook_login import (  # noqa: E402
     looks_like_checkpoint,
@@ -461,6 +461,19 @@ async def _run(args: argparse.Namespace) -> None:
             log.info("Logged-in URL: %s", page.url)
         except Exception:
             pass
+
+        # First post-login human action: tap the mobile FB "feed" tab once
+        # (aria-label="feed, 1 of N"). This mirrors what a real user does
+        # right after opening the app — and on the desktop site we fall
+        # back to the Home nav link inside ``click_feed_tab``.
+        log.info("Clicking the feed tab once before starting activity...")
+        try:
+            clicked = await click_feed_tab(page, log=log)
+            if clicked:
+                # Brief settle — feed re-renders after this tap on mobile FB.
+                await random_delay(1.4, 2.6)
+        except Exception as exc:
+            log.warning("Feed tab click skipped due to error: %s", exc)
 
         # Wait for the feed to actually contain Like buttons or articles
         # before starting the activity loop. Mobile FB lazy-loads the feed
