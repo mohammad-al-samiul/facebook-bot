@@ -69,11 +69,135 @@ _FALLBACK_COMMENT: Final[str] = "Nice post!"
 _BANGLA_RE: Final[re.Pattern[str]] = re.compile(r"[\u0980-\u09FF]")
 
 
-def _detect_language(text: str) -> str:
-    """Return ``'bn'`` when Bangla characters are present, else ``'en'``."""
+def detect_post_language(text: str) -> str:
+    """Return ``'bn'`` when Bangla characters are present in the post, else ``'en'``."""
     if _BANGLA_RE.search(text or ""):
         return "bn"
     return "en"
+
+
+def _detect_language(text: str) -> str:
+    return detect_post_language(text)
+
+
+# Facebook UI chrome that pollutes ``inner_text`` and confuses the LLM.
+_FB_UI_NOISE_RE: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"\bLike\b", re.I),
+    re.compile(r"\bComment\b", re.I),
+    re.compile(r"\bShare\b", re.I),
+    re.compile(r"\bReact\b", re.I),
+    re.compile(r"\bSee more\b", re.I),
+    re.compile(r"\bSee less\b", re.I),
+    re.compile(r"\bShared with\b", re.I),
+    re.compile(r"\bSuggested for you\b", re.I),
+    re.compile(r"\bSponsored\b", re.I),
+    re.compile(r"\bলাইক\b"),
+    re.compile(r"\bমন্তব্য\b"),
+    re.compile(r"\bশেয়ার\b|শেয়ার"),
+    re.compile(r"\b\d+\s*(comments?|shares?|reactions?|likes?)\b", re.I),
+    re.compile(r"\b\d+\s*(minutes?|hours?|days?|weeks?)\s+ago\b", re.I),
+    re.compile(r"\b\d+[hdwm]\b", re.I),
+)
+
+
+def clean_post_text(raw: str, *, max_chars: int = 400) -> str:
+    """
+    Strip Facebook UI labels / counts from scraped post text so the LLM sees
+  only the author's message.
+    """
+    text = " ".join((raw or "").split())
+    if not text:
+        return ""
+    for pat in _FB_UI_NOISE_RE:
+        text = pat.sub(" ", text)
+    text = " ".join(text.split())
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit(" ", 1)[0] or text[:max_chars]
+    return text.strip()
+
+
+_GENERIC_COMMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"^(ভালো|ভাল|nice|good|great|well\s*said|loved\s*it|wow|amazing|"
+    r"সুন্দর\s*পোস্ট|ভালো\s*বল|ভালো\s*লাগ|চমৎকার|দারুণ|শুভেচ্ছা)\b",
+    re.I,
+)
+
+
+def comment_is_too_generic(comment: str, post_text: str) -> bool:
+    """True when the reply is a lazy one-liner that ignores specific post content."""
+    c = (comment or "").strip()
+    p = clean_post_text(post_text)
+    if not c:
+        return True
+    bare = c.lower().strip("!।.?… ")
+    lazy_bn = (
+        "ভালো",
+        "ভাল",
+        "ভালো বললে",
+        "ভালো লাগল",
+        "সুন্দর পোস্ট",
+        "চমৎকার",
+        "দারুণ",
+        "শুভেচ্ছা",
+    )
+    lazy_en = ("nice post", "good post", "well said", "great share", "loved it", "wow")
+    if bare in lazy_bn + lazy_en:
+        return True
+    if _GENERIC_COMMENT_RE.match(c) and len(p) > 40:
+        return True
+    if len(c) <= 12 and len(p) > 55 and not re.search(r"[\u0980-\u09FF]{2,}|[a-z]{4,}", c, re.I):
+        return True
+    return False
+
+
+def comment_seems_relevant(comment: str, post_text: str) -> bool:
+    """Reject generic or off-topic comments when the post has clear content."""
+    c = (comment or "").strip()
+    p = clean_post_text(post_text)
+    if not c:
+        return False
+    if not p or len(p) < 12:
+        return True
+
+    c_low = c.lower()
+    p_low = p.lower()
+
+    if comment_is_too_generic(c, p):
+        return False
+
+    bare = c_low.strip("!।.?… ")
+    generic_bn = ("শুভেচ্ছা", "সুন্দর পোস্ট", "ভালো লাগল", "চমৎকার", "দারুণ")
+    generic_en = ("nice post", "well said", "great share", "loved it", "congrats", "wow")
+    if len(p) > 50 and bare in generic_bn + generic_en:
+        return False
+
+    angry_c = ("রাগ", "বিজিত", "ঘৃণা", "hate", "angry", "disgusting", "outrage")
+    if any(w in c_low for w in angry_c) and not _looks_outraged(p):
+        return False
+
+    romance_c = ("প্রেম", "kiss", "romantic", "love you", "couple goals")
+    if any(w in c_low for w in romance_c) and _detect_tone(p) not in ("love",):
+        if not any(w in p_low for w in ("প্রেম", "love", "বিয়ে", "wedding", "valentine")):
+            return False
+
+    post_tokens = set(re.findall(r"[\w\u0980-\u09FF]{3,}", p_low))
+    comment_tokens = set(re.findall(r"[\w\u0980-\u09FF]{3,}", c_low))
+    if post_tokens and comment_tokens and (post_tokens & comment_tokens):
+        return True
+
+    if _detect_tone(p) != "neutral" and len(c) <= 40:
+        return True
+
+    return len(p) < 35
+
+
+def comment_matches_post_language(comment: str, post_text: str) -> bool:
+    """True when the comment script matches the post (bn post → bn comment, en → en)."""
+    post_lang = detect_post_language(post_text)
+    comment_has_bn = bool(_BANGLA_RE.search(comment or ""))
+    if post_lang == "bn":
+        return comment_has_bn
+    return not comment_has_bn
 
 
 # Tone buckets used by both the AI prompt (as a hint) and the fallback
@@ -130,22 +254,9 @@ def _detect_tone(text: str) -> str:
 
 
 _ANGRY_HINTS: Final[tuple[str, ...]] = (
-    "disgusting",
-    "outrage",
-    "furious",
-    "horrible",
-    "shame on",
-    "how dare",
-    "messed up",
-    "wtf is wrong",
-    "so angry",
-    "this is evil",
-    "hate this",
-    "unacceptable",
-    "scandal",
-    "corrupt",
-    "😡",
-    "🤬",
+    "disgusting", "outrage", "furious", "horrible", "shame on", "how dare",
+    "messed up", "wtf is wrong", "so angry", "this is evil", "hate this",
+    "unacceptable", "scandal", "corrupt", "😡", "🤬",
 )
 
 
@@ -158,7 +269,6 @@ def _weighted_reaction(
     rng: random.Random,
     choices: tuple[tuple[ReactionType, float], ...],
 ) -> ReactionType:
-    """Pick a reaction using non-negative weights (any positive scale)."""
     total = sum(w for _, w in choices)
     if total <= 0:
         return ReactionType.LIKE
@@ -175,11 +285,10 @@ def pick_reaction_for_post(
     rng: random.Random | None = None,
 ) -> ReactionType:
     """
-    Choose a feed reaction aligned with post tone, with randomness so the
-    bot does not always use the same emoji family.
-
-    Drives Like / Love / Care / Haha / Wow / Sad / Angry via
-    :func:`~playwright_automation.actions.react_to_post`.
+    Pick a reaction for the feed. **Like** = normal tap. **Love / Care / Haha /
+    Angry** (and Wow/Sad) = long-press rail then chip — weights favour extended
+    reactions over thumbs-up. Mobile chips use ``data-image-id`` in
+    ``react_to_post``.
     """
     r = rng if rng is not None else random.Random()
     tone = _detect_tone(text)
@@ -189,10 +298,11 @@ def pick_reaction_for_post(
         return _weighted_reaction(
             r,
             (
-                (ReactionType.HAHA, 62),
+                (ReactionType.HAHA, 48),
+                (ReactionType.LOVE, 18),
                 (ReactionType.WOW, 14),
-                (ReactionType.LIKE, 16),
-                (ReactionType.LOVE, 8),
+                (ReactionType.CARE, 12),
+                (ReactionType.LIKE, 8),
             ),
         )
     if tone == "sad":
@@ -200,27 +310,30 @@ def pick_reaction_for_post(
             r,
             (
                 (ReactionType.SAD, 38),
-                (ReactionType.CARE, 47),
-                (ReactionType.LIKE, 15),
+                (ReactionType.CARE, 42),
+                (ReactionType.LOVE, 12),
+                (ReactionType.LIKE, 8),
             ),
         )
     if tone == "love":
         return _weighted_reaction(
             r,
             (
-                (ReactionType.LOVE, 58),
-                (ReactionType.CARE, 27),
-                (ReactionType.LIKE, 15),
+                (ReactionType.LOVE, 52),
+                (ReactionType.CARE, 32),
+                (ReactionType.HAHA, 8),
+                (ReactionType.LIKE, 8),
             ),
         )
     if tone == "achievement":
         return _weighted_reaction(
             r,
             (
-                (ReactionType.LOVE, 36),
-                (ReactionType.LIKE, 30),
-                (ReactionType.CARE, 17),
-                (ReactionType.WOW, 17),
+                (ReactionType.LOVE, 38),
+                (ReactionType.WOW, 22),
+                (ReactionType.CARE, 18),
+                (ReactionType.HAHA, 12),
+                (ReactionType.LIKE, 10),
             ),
         )
     if tone == "food":
@@ -228,9 +341,10 @@ def pick_reaction_for_post(
             r,
             (
                 (ReactionType.LOVE, 28),
-                (ReactionType.HAHA, 22),
-                (ReactionType.LIKE, 35),
-                (ReactionType.WOW, 15),
+                (ReactionType.HAHA, 28),
+                (ReactionType.WOW, 18),
+                (ReactionType.CARE, 14),
+                (ReactionType.LIKE, 12),
             ),
         )
     if tone == "news":
@@ -238,70 +352,79 @@ def pick_reaction_for_post(
             return _weighted_reaction(
                 r,
                 (
-                    (ReactionType.ANGRY, 35),
-                    (ReactionType.WOW, 25),
-                    (ReactionType.SAD, 15),
-                    (ReactionType.LIKE, 25),
+                    (ReactionType.ANGRY, 40),
+                    (ReactionType.WOW, 22),
+                    (ReactionType.SAD, 16),
+                    (ReactionType.CARE, 14),
+                    (ReactionType.LIKE, 8),
                 ),
             )
         return _weighted_reaction(
             r,
             (
                 (ReactionType.WOW, 28),
-                (ReactionType.LIKE, 52),
-                (ReactionType.CARE, 10),
-                (ReactionType.SAD, 10),
+                (ReactionType.CARE, 22),
+                (ReactionType.SAD, 18),
+                (ReactionType.HAHA, 14),
+                (ReactionType.LOVE, 10),
+                (ReactionType.LIKE, 8),
             ),
         )
     if tone == "travel":
         return _weighted_reaction(
             r,
             (
-                (ReactionType.WOW, 38),
-                (ReactionType.LOVE, 27),
-                (ReactionType.LIKE, 35),
+                (ReactionType.WOW, 34),
+                (ReactionType.LOVE, 30),
+                (ReactionType.CARE, 16),
+                (ReactionType.HAHA, 12),
+                (ReactionType.LIKE, 8),
             ),
         )
     if tone == "promo":
         return _weighted_reaction(
             r,
             (
-                (ReactionType.LIKE, 72),
-                (ReactionType.HAHA, 15),
-                (ReactionType.WOW, 13),
+                (ReactionType.HAHA, 22),
+                (ReactionType.WOW, 18),
+                (ReactionType.CARE, 18),
+                (ReactionType.LOVE, 14),
+                (ReactionType.LIKE, 28),
             ),
         )
     if tone == "religious":
         return _weighted_reaction(
             r,
             (
-                (ReactionType.LOVE, 22),
-                (ReactionType.CARE, 30),
-                (ReactionType.LIKE, 48),
+                (ReactionType.LOVE, 32),
+                (ReactionType.CARE, 38),
+                (ReactionType.WOW, 12),
+                (ReactionType.HAHA, 10),
+                (ReactionType.LIKE, 8),
             ),
         )
-    # neutral (+ optional outrage tilt)
     if mad:
         return _weighted_reaction(
             r,
             (
-                (ReactionType.ANGRY, 28),
-                (ReactionType.LIKE, 33),
-                (ReactionType.WOW, 15),
-                (ReactionType.HAHA, 12),
-                (ReactionType.LOVE, 12),
+                (ReactionType.ANGRY, 36),
+                (ReactionType.WOW, 18),
+                (ReactionType.HAHA, 14),
+                (ReactionType.SAD, 14),
+                (ReactionType.LOVE, 10),
+                (ReactionType.LIKE, 8),
             ),
         )
     return _weighted_reaction(
         r,
         (
-            (ReactionType.LIKE, 30),
             (ReactionType.LOVE, 20),
-            (ReactionType.HAHA, 18),
-            (ReactionType.WOW, 12),
-            (ReactionType.CARE, 10),
-            (ReactionType.SAD, 5),
-            (ReactionType.ANGRY, 5),
+            (ReactionType.HAHA, 20),
+            (ReactionType.CARE, 18),
+            (ReactionType.WOW, 14),
+            (ReactionType.SAD, 8),
+            (ReactionType.ANGRY, 8),
+            (ReactionType.LIKE, 12),
         ),
     )
 
@@ -414,10 +537,66 @@ _FALLBACK_BY_TONE: Final[dict[str, dict[str, tuple[str, ...]]]] = {
         "bn": ("দেখব", "ভালো উদ্যোগ", "কাজে লাগবে"),
     },
     "neutral": {
-        "en": ("Nice post!", "Well said", "Great share", "Appreciated", "Loved it 👍"),
-        "bn": ("সুন্দর পোস্ট", "ভালো বললে", "চমৎকার", "মন ছুঁয়ে গেল"),
+        "en": ("Thanks for sharing this", "Interesting point", "Good to know", "Makes sense"),
+        "bn": ("শেয়ার করার জন্য ধন্যবাদ", "বিষয়টা জানা গেল", "মনে রাখলাম"),
     },
 }
+
+_STOPWORDS: Final[frozenset[str]] = frozenset({
+    "the", "and", "for", "that", "this", "with", "from", "have", "been", "will",
+    "করে", "করা", "হয়", "হবে", "আছে", "একটা", "এই", "তার", "কিন্তু",
+})
+
+
+def _extract_post_keywords(snippet: str, *, max_kw: int = 3) -> list[str]:
+    """Pick a few meaningful tokens from the post for contextual offline comments."""
+    text = clean_post_text(snippet)
+    if not text:
+        return []
+    tokens = re.findall(r"[\w\u0980-\u09FF]{3,}", text.lower())
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        if tok in _STOPWORDS or tok in seen:
+            continue
+        seen.add(tok)
+        scored.append((len(tok), tok))
+    scored.sort(reverse=True)
+    return [t for _, t in scored[:max_kw]]
+
+
+def _contextual_comment_fallback(snippet: str, *, avoid: tuple[str, ...] = ()) -> str:
+    """Offline comment that references the post topic — not a bare 'ভালো'."""
+    lang = detect_post_language(snippet)
+    tone = _detect_tone(snippet)
+    keywords = _extract_post_keywords(snippet)
+    avoid_low = {a.lower().strip() for a in avoid if a}
+
+    if keywords:
+        kw = keywords[0]
+        if lang == "bn":
+            templates = (
+                f"{kw} নিয়ে লিখেছেন, বুঝতে পারছি।",
+                f"{kw} বিষয়টা আলোচনার দাবি রাখে।",
+                f"এই {kw} নিয়ে ভাবতে হবে।",
+                f"{kw} — দারুণ বিষয় বেছে নিয়েছেন।",
+            )
+        else:
+            templates = (
+                f"Good point about {kw}.",
+                f"The {kw} angle makes sense.",
+                f"Interesting take on {kw}.",
+            )
+        pool = [t for t in templates if t.lower() not in avoid_low]
+        if pool:
+            return random.choice(pool)
+
+    fb = _fallback_for(snippet)
+    if fb.lower() not in avoid_low:
+        return fb
+    bucket = _FALLBACK_BY_TONE.get(tone, _FALLBACK_BY_TONE["neutral"])
+    pool = [p for p in bucket.get(lang, ()) if p.lower() not in avoid_low]
+    return random.choice(pool) if pool else _FALLBACK_COMMENT
 
 
 def _fallback_for(snippet: str) -> str:
@@ -457,7 +636,7 @@ async def get_ai_comment(post_text: str, *, timeout: float = 12.0) -> str:
     a religious post, "Haha 😂" for a funny post) on any failure.
     """
     api_key = (os.environ.get("GEMINI_API_KEY") or _GEMINI_DEFAULT_KEY).strip()
-    snippet = (post_text or "").strip()
+    snippet = clean_post_text((post_text or "").strip(), max_chars=500)
     fallback = _fallback_for(snippet)
 
     if not api_key:
@@ -466,8 +645,6 @@ async def get_ai_comment(post_text: str, *, timeout: float = 12.0) -> str:
 
     if not snippet:
         return fallback
-
-    snippet = snippet[:600]
     lang = _detect_language(snippet)
     tone = _detect_tone(snippet)
     prompt = _build_prompt(snippet, lang, tone)
@@ -478,8 +655,8 @@ async def get_ai_comment(post_text: str, *, timeout: float = 12.0) -> str:
             {"role": "user", "parts": [{"text": prompt}]},
         ],
         "generationConfig": {
-            "temperature": 0.9,
-            "topP": 0.95,
+            "temperature": 0.45,
+            "topP": 0.9,
             # gemini-flash-latest currently resolves to gemini-3-flash-preview,
             # which spends "thinking" tokens before output. With a tight
             # maxOutputTokens the entire budget gets consumed by thoughts and
@@ -522,7 +699,243 @@ async def get_ai_comment(post_text: str, *, timeout: float = 12.0) -> str:
 
     if len(text) > 120:
         text = text[:120].rstrip() + "..."
+    clean = clean_post_text(snippet)
+    if not comment_matches_post_language(text, clean or snippet):
+        logger.warning(
+            "Gemini comment language mismatch (post=%s) — using tone fallback",
+            lang,
+        )
+        return fallback
+    if not comment_seems_relevant(text, clean or snippet):
+        logger.warning("Gemini comment off-topic — using tone fallback")
+        return fallback
     return text
 
 
-__all__ = ["get_ai_comment", "pick_reaction_for_post"]
+_STATUS_STYLES: dict[str, dict[str, tuple[str, ...]]] = {
+    "weather": {
+        "bn": ("আজ বৃষ্টি হচ্ছে, চা আর বই—মনটা শান্ত।", "শীতের সকালে হালকা কুয়াশা, ভালো লাগছে।"),
+        "en": ("Rainy afternoon and tea — cozy mood.", "Chilly morning but the sky looks calm."),
+    },
+    "food": {
+        "bn": ("আজ বাড়িতে বিরিয়ানি—সবাই মিলে খাওয়ার প্ল্যান।", "মা হাতে রান্না করলেন, স্বাদ অসাধারণ।"),
+        "en": ("Homemade biryani tonight — family dinner plan.", "Mom's cooking hit different today."),
+    },
+    "family": {
+        "bn": ("ছোট বোনের হাসি দেখে দিনটা ভালো হয়ে গেল।", "বাবা-মায়ের দোয়া সবসময় পাশে আছে।"),
+        "en": ("My little sister's laugh made my day.", "Grateful for my parents every single day."),
+    },
+    "work": {
+        "bn": ("নতুন প্রজেক্ট শুরু—একটু চাপ কিন্তু উৎসাহ আছে।", "আজ অফিসে প্রেজেন্টেশন ভালো গেল।"),
+        "en": ("Starting a new project — busy but excited.", "Presentation went better than I expected."),
+    },
+    "weekend": {
+        "bn": ("শুক্রবার বিকেলে ফুটবল আর বন্ধুদের সাথে আড্ডা।", "উইকেন্ডে লং ড্রাইভ—মন চাইল।"),
+        "en": ("Friday evening football with friends.", "Weekend road trip is calling."),
+    },
+    "gratitude": {
+        "bn": ("আলহামদুলিল্লাহ সব ঠিক আছে—ছোট ছোট জিনিসেই শান্তি।", "যা আছে তাতেই খুশি, আর চাই না বেশি।"),
+        "en": ("Alhamdulillah for the little things.", "Content with what I have today."),
+    },
+    "sports": {
+        "bn": ("আজ রাতে ম্যাচ—সবাই রেডি?", "ক্রিকেট খেলতে মাঠে গেলাম, মজা হলো।"),
+        "en": ("Big match tonight — who's watching?", "Played cricket with friends — great fun."),
+    },
+    "tech": {
+        "bn": ("নতুন ফোন সেটআপ করছি, ক্যামেরা দারুণ।", "ল্যাপটপ আপডেট শেষ—কাজ আরও স্মুথ।"),
+        "en": ("New phone setup — camera is amazing.", "Finally updated my laptop — so much faster."),
+    },
+    "question": {
+        "bn": ("তোমরা ছুটিতে কোথায় যাচ্ছ? কমেন্টে বলো।", "সবার প্রিয় বিকেলের নাস্তা কী?"),
+        "en": ("Where is everyone traveling this holiday?", "What's your go-to evening snack?"),
+    },
+    "memory": {
+        "bn": ("হঠাৎ পুরনো স্কুলের দিন মনে পড়ে গেল।", "ছোটবেলার গ্রামের রাস্তা মিস করি।"),
+        "en": ("Random flashback to school days today.", "Missing the village roads from childhood."),
+    },
+    "nature": {
+        "bn": ("সন্ধ্যায় নদীর ধারে হাঁটা—মন ভালো হয়ে যায়।", "বাগানের গোলাপ ফুটেছে, সুন্দর লাগছে।"),
+        "en": ("Evening walk by the river — peaceful.", "Roses bloomed in the garden today."),
+    },
+}
+
+
+def pick_status_post_style(*, avoid: list[str] | None = None) -> str:
+    """Pick a post topic style not used recently (for variety)."""
+    avoid_set = {a.strip().lower() for a in (avoid or []) if a}
+    keys = [k for k in _STATUS_STYLES if k not in avoid_set]
+    if not keys:
+        keys = list(_STATUS_STYLES.keys())
+    return random.choice(keys)
+
+
+async def generate_status_post(
+    *,
+    prefer_bn: bool | None = None,
+    timeout: float = 60.0,
+    avoid_styles: list[str] | None = None,
+) -> tuple[str, str]:
+    """
+    Varied short status for the feed composer.
+
+    Returns ``(text, style_key)`` — style rotates (food, sports, family, etc.).
+    """
+    import asyncio
+
+    use_bn = prefer_bn if prefer_bn is not None else random.random() < 0.55
+    lang = "bn" if use_bn else "en"
+    style = pick_status_post_style(avoid=avoid_styles)
+    pool = _STATUS_STYLES[style][lang]
+    fallback = random.choice(pool)
+
+    style_hints_bn = {
+        "weather": "আবহাওয়া/মৌসুম",
+        "food": "খাবার বা রান্না",
+        "family": "পরিবার বা প্রিয়জন",
+        "work": "কাজ বা পড়াশোনা",
+        "weekend": "ছুটি বা আড্ডা",
+        "gratitude": "কৃতজ্ঞতা",
+        "sports": "খেলা/ক্রিকেট/ফুটবল",
+        "tech": "টেক/গ্যাজেট",
+        "question": "বন্ধুদের হালকা প্রশ্ন",
+        "memory": "স্মৃতি/নস্টালজিয়া",
+        "nature": "প্রকৃতি/ভ্রমণ",
+    }
+    style_hints_en = {
+        "weather": "weather or season",
+        "food": "food or cooking",
+        "family": "family or loved ones",
+        "work": "work or study",
+        "weekend": "weekend plans",
+        "gratitude": "gratitude",
+        "sports": "sports or match",
+        "tech": "tech or gadgets",
+        "question": "a light question to friends",
+        "memory": "a memory or nostalgia",
+        "nature": "nature or outdoors",
+    }
+    hint = style_hints_bn.get(style, style) if use_bn else style_hints_en.get(style, style)
+    avoid_txt = ", ".join(avoid_styles or []) or "none"
+
+    try:
+        from playwright_automation.brain import _chat, _default_model
+
+        if use_bn:
+            system = (
+                "তুমি Facebook-এ মানুষের মতো **বিভিন্ন ধরনের** ছোট স্ট্যাটাস লেখো। "
+                "প্রতিবার আলাদা টপিক ও ভাব। শুধু বাংলায়। ১–২ বাক্য, সর্বোচ্চ ১২০ অক্ষর। "
+                "হ্যাশট্যাগ নয়। কটুক্তি/রাজনীতি নয়। শুধু পোস্ট টেক্সট।"
+            )
+            user = (
+                f"এবারের টপিক: {hint}। আগের স্টাইল এড়াও: {avoid_txt}। "
+                "সাধারণ 'ভালো দিন' টাইপ ক্লিশে লিখবে না। নতুন কিছু লেখো।"
+            )
+        else:
+            system = (
+                "You write varied Facebook status posts — different topic and tone each time. "
+                "English only. 1–2 sentences, max 120 chars. No hashtags. No politics."
+            )
+            user = (
+                f"Topic for this post: {hint}. Avoid repeating these recent styles: {avoid_txt}. "
+                "Do NOT write another generic 'good day' post — be specific."
+            )
+
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(
+                _chat,
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                model=_default_model(),
+                format_json=False,
+            ),
+            timeout=timeout,
+        )
+        text = (raw or "").strip().strip('"').strip("'")
+        if text and comment_matches_post_language(text, "আ" if use_bn else "Hello"):
+            logger.info("Status from Ollama (%s, style=%s): %r", lang, style, text[:80])
+            return text[:400], style
+    except Exception as exc:
+        logger.debug("Ollama status failed: %s", exc)
+
+    logger.info("Using offline %s status fallback (style=%s)", lang, style)
+    return fallback, style
+
+
+async def generate_comment_for_post(
+    post_text: str,
+    *,
+    timeout: float = 75.0,
+    avoid_comments: tuple[str, ...] = (),
+) -> str:
+    """
+    Post-relevant comment in the **same language** as the post (Bangla or English).
+
+    Reads the post, tries Ollama (twice), then Gemini, then a contextual offline line.
+    """
+    import asyncio
+
+    snippet = clean_post_text((post_text or "").strip(), max_chars=500)
+    if not snippet:
+        return _contextual_comment_fallback("", avoid=avoid_comments)
+
+    lang = detect_post_language(snippet)
+    keywords = _extract_post_keywords(snippet)
+    logger.info(
+        "Post for comment (%s, %d chars, kw=%s): %r",
+        lang,
+        len(snippet),
+        keywords,
+        snippet[:80],
+    )
+
+    def _accept(candidate: str) -> bool:
+        if not candidate or candidate.lower().strip() in {a.lower().strip() for a in avoid_comments}:
+            return False
+        if not comment_matches_post_language(candidate, snippet):
+            return False
+        if comment_is_too_generic(candidate, snippet):
+            return False
+        return comment_seems_relevant(candidate, snippet)
+
+    try:
+        from playwright_automation.brain import analyze_post_and_respond, analyze_post_focused
+
+        for attempt, fn in enumerate((analyze_post_and_respond, analyze_post_focused), start=1):
+            try:
+                analysis = await asyncio.wait_for(
+                    asyncio.to_thread(fn, snippet, keywords=keywords),
+                    timeout=timeout,
+                )
+                if _accept(analysis.comment):
+                    logger.info("Comment from Ollama attempt %d (%s): %r", attempt, lang, analysis.comment[:60])
+                    return analysis.comment
+                logger.warning("Ollama attempt %d rejected — %r", attempt, analysis.comment[:50])
+            except Exception as exc:
+                logger.debug("Ollama attempt %d failed: %s", attempt, exc)
+    except Exception as exc:
+        logger.debug("Ollama import/call failed: %s", exc)
+
+    try:
+        gemini_text = await get_ai_comment(snippet, timeout=min(timeout, 30.0))
+        if _accept(gemini_text):
+            logger.info("Comment from Gemini (%s): %r", lang, gemini_text[:60])
+            return gemini_text
+        logger.warning("Gemini comment rejected — using contextual fallback")
+    except Exception as exc:
+        logger.debug("Gemini comment failed: %s", exc)
+
+    fb = _contextual_comment_fallback(snippet, avoid=avoid_comments)
+    logger.info("Contextual %s fallback: %r", lang, fb[:60])
+    return fb
+
+
+__all__ = [
+    "clean_post_text",
+    "comment_is_too_generic",
+    "comment_matches_post_language",
+    "comment_seems_relevant",
+    "detect_post_language",
+    "generate_comment_for_post",
+    "generate_status_post",
+    "get_ai_comment",
+    "pick_reaction_for_post",
+]

@@ -7,10 +7,10 @@ This module contains the high-level "process the next post" logic that:
 - Extracts the visible text snippet of each post (used both for AI prompts
   and for deduplication).
 - Skips any post we've already interacted with in this session.
-- Applies probabilistic reactions (Like / Love / Care / Haha / Wow / Sad /
-  Angry) with ``like_probability`` (default 70%), chosen from post text via
-  :func:`~playwright_automation.ai_comment.pick_reaction_for_post`, plus an
-  AI-generated comment with ``comment_probability`` (default 40%).
+- Applies probabilistic feed reactions with ``like_probability`` (whether to
+  react on a post at all). The reaction kind defaults to **weighted dice**
+  (60% Like / 20% Love / 10% Haha / 10% other) or optional **tone-based** pick
+  from post text — see ``reaction_strategy`` on :func:`engage_with_next_posts`.
 - Returns a structured summary of what happened so callers can implement
   cooldowns / metrics on top.
 
@@ -24,7 +24,7 @@ import hashlib
 import logging
 import random
 from dataclasses import dataclass, field
-from typing import Final, Iterable
+from typing import Final, Literal
 
 from playwright.async_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
@@ -34,8 +34,13 @@ from playwright_automation.actions import (
     human_like_scroll,
     random_delay,
     react_to_post,
+    share_post,
 )
-from playwright_automation.ai_comment import get_ai_comment, pick_reaction_for_post
+from playwright_automation.ai_comment import (
+    clean_post_text,
+    generate_comment_for_post,
+    pick_reaction_for_post,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +52,11 @@ class PostEngagementResult:
     fingerprint: str
     text_snippet: str
     liked: bool = False
-    """True when a feed reaction (any type) was applied."""
+    """True when a feed reaction was applied (Like or long-press reaction)."""
     reaction_kind: str | None = None
     commented: bool = False
     comment_text: str | None = None
+    shared: bool = False
     skipped_reason: str | None = None
 
 
@@ -62,6 +68,33 @@ class SessionState:
     interactions: int = 0
     reactions: int = 0
     comments: int = 0
+    shares: int = 0
+
+
+def pick_reaction_probability_weights(
+    rng: random.Random | None = None,
+) -> ReactionType:
+    """
+    Fixed distribution for feed reactions (per engagement pass).
+
+    Default mix: **60% Like**, **20% Love**, **10% Haha**, **10%** split evenly
+    among Wow / Care / Sad / Angry.
+    """
+    r = rng if rng is not None else random.Random()
+    roll = r.random()
+    if roll < 0.60:
+        return ReactionType.LIKE
+    if roll < 0.80:
+        return ReactionType.LOVE
+    if roll < 0.90:
+        return ReactionType.HAHA
+    others = (
+        ReactionType.WOW,
+        ReactionType.CARE,
+        ReactionType.SAD,
+        ReactionType.ANGRY,
+    )
+    return r.choice(others)
 
 
 def _fingerprint(text: str) -> str:
@@ -73,21 +106,53 @@ def _fingerprint(text: str) -> str:
     return hashlib.sha1(cleaned.encode("utf-8", errors="ignore")).hexdigest()
 
 
-async def _post_text_snippet(post: Locator, *, max_chars: int = 600) -> str:
-    """Best-effort visible text extraction from a post container.
+_EXTRACT_STORY_JS: Final[str] = """
+(el) => {
+  const selectors = [
+    '[data-ad-preview="message"]',
+    '[data-testid="post_message"]',
+    'motion.p[dir="auto"]',
+    'motion.span[dir="auto"]',
+    'motion.div[dir="auto"]',
+    'motion.div div[dir="auto"]',
+    'div[dir="auto"]',
+  ];
+  for (const sel of selectors) {
+    const nodes = el.querySelectorAll(sel);
+    for (const n of nodes) {
+      const t = (n.innerText || '').trim();
+      if (t.length > 12 && !/^(Like|Comment|Share|লাইক|মন্তব্য)/i.test(t)) {
+        return t;
+      }
+    }
+  }
+  let best = '';
+  for (const n of el.querySelectorAll('[dir="auto"]')) {
+    const t = (n.innerText || '').trim();
+    if (t.length > best.length && t.length < 800) best = t;
+  }
+  return best;
+}
+"""
 
-    Returns an empty string when there's no visible text — callers should
-    skip such posts (image-only or fully iframe-embedded) rather than feed
-    raw HTML to the AI commenter.
-    """
+
+async def _post_text_snippet(post: Locator, *, max_chars: int = 600) -> str:
+    """Extract the post author's message (not Like/Comment/Share chrome)."""
+    story = ""
     try:
-        txt = await post.inner_text(timeout=2_500)
-    except PlaywrightTimeoutError:
-        txt = ""
+        handle = await post.element_handle(timeout=2_000)
+        if handle is not None:
+            story = (await handle.evaluate(_EXTRACT_STORY_JS)) or ""
     except Exception:
-        txt = ""
-    txt = " ".join((txt or "").split())
-    return txt[:max_chars]
+        story = ""
+    if not story or len(story) < 8:
+        try:
+            story = await post.inner_text(timeout=2_500)
+        except PlaywrightTimeoutError:
+            story = ""
+        except Exception:
+            story = ""
+    return clean_post_text(story, max_chars=max_chars)
 
 
 async def _post_is_visible(post: Locator) -> bool:
@@ -232,14 +297,22 @@ async def engage_with_next_posts(
     max_posts_per_pass: int = 5,
     like_probability: float = 0.70,
     comment_probability: float = 0.75,
+    share_probability: float = 0.12,
     pre_action_min_sec: float = 2.0,
     pre_action_max_sec: float = 5.0,
     inter_post_scroll: bool = True,
+    reaction_strategy: Literal["probability", "tone"] = "probability",
 ) -> list[PostEngagementResult]:
     """
     Walk visible posts once, react/comment according to probabilities, and
     return per-post results. Each post is only touched once per
     :class:`SessionState`.
+
+    **Reactions:** ``reaction_strategy="probability"`` (default) picks Like/Love/
+    Haha/Others with fixed weights (60% / 20% / 10% / 10%) and passes that to
+    :func:`~playwright_automation.actions.react_to_post`. ``"tone"`` uses
+    :func:`~playwright_automation.ai_comment.pick_reaction_for_post` from post
+    text instead.
 
     The caller decides when to stop (e.g. after N interactions) and is
     responsible for cooldown / outer scrolling between passes.
@@ -276,11 +349,21 @@ async def engage_with_next_posts(
         # Reading pause — a human looks at the post before reacting.
         await random_delay(pre_action_min_sec, pre_action_max_sec)
 
-        # ---- Feed reaction (Like / Love / Haha / …) with `like_probability`
+        # ---- Feed reaction (Like tap or long-press rail) ------------------
         like_roll = random.random()
         if like_roll < like_probability:
-            reaction = pick_reaction_for_post(text, rng=random.Random())
-            timeout_sec = 14.0 if reaction != ReactionType.LIKE else 8.0
+            rng = random.Random()
+            if reaction_strategy == "tone":
+                reaction = pick_reaction_for_post(text, rng=rng)
+            else:
+                reaction = pick_reaction_probability_weights(rng=rng)
+            logger.info(
+                "Reaction choice strategy=%s → %s (passing to react_to_post)",
+                reaction_strategy,
+                reaction.value,
+            )
+            # Like: short tap. Extended: 2s hold + rail wait + chip — needs a higher cap.
+            timeout_sec = 14.0 if reaction == ReactionType.LIKE else 42.0
             try:
                 await asyncio.wait_for(
                     react_to_post(page, post, reaction),
@@ -317,7 +400,7 @@ async def engage_with_next_posts(
                 fp[:10], comment_roll, comment_probability,
             )
             try:
-                comment_text = await get_ai_comment(text)
+                comment_text = await generate_comment_for_post(text)
                 logger.info(
                     "AI comment for fp=%s: %r", fp[:10], comment_text,
                 )
@@ -348,7 +431,25 @@ async def engage_with_next_posts(
                 fp[:10], comment_roll, comment_probability,
             )
 
-        if result.liked or result.commented:
+        # ---- Share --------------------------------------------------------
+        share_roll = random.random()
+        if share_roll < share_probability:
+            try:
+                shared = await asyncio.wait_for(
+                    share_post(page, post),
+                    timeout=25.0,
+                )
+                if shared:
+                    result.shared = True
+                    state.shares += 1
+                    logger.info("Shared post fp=%s", fp[:10])
+                    await random_delay(1.0, 2.0)
+            except asyncio.TimeoutError:
+                logger.warning("Share attempt timed out for fp=%s", fp[:10])
+            except Exception as exc:
+                logger.warning("Share attempt failed for fp=%s: %s", fp[:10], exc)
+
+        if result.liked or result.commented or result.shared:
             state.interactions += 1
 
         results.append(result)
@@ -369,8 +470,51 @@ async def engage_with_next_posts(
     return results
 
 
+async def has_feed_posts(page: Page) -> bool:
+    """True when the page has at least one Like button or article post (no warning logs)."""
+    for sel in _POST_CONTAINER_SELECTORS:
+        try:
+            if await page.locator(sel).count() > 0:
+                return True
+        except Exception:
+            continue
+    for sel in _LIKE_BUTTON_SELECTORS:
+        try:
+            if await page.locator(sel).count() > 0:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def pick_random_visible_post(
+    page: Page,
+    *,
+    rng: random.Random | None = None,
+) -> tuple[Locator, str] | None:
+    """Return a visible feed post locator and text snippet (mobile Like-anchor fallback)."""
+    r = rng if rng is not None else random.Random()
+    posts = await _iter_post_locators(page, 14)
+    if not posts:
+        return None
+    r.shuffle(posts)
+    for post in posts[:10]:
+        if not await _post_is_visible(post):
+            continue
+        text = await _post_text_snippet(post)
+        if text:
+            return post, text
+    for post in posts[:6]:
+        if await _post_is_visible(post):
+            return post, (await _post_text_snippet(post)) or ""
+    return None
+
+
 __all__ = [
     "PostEngagementResult",
     "SessionState",
     "engage_with_next_posts",
+    "has_feed_posts",
+    "pick_random_visible_post",
+    "pick_reaction_probability_weights",
 ]

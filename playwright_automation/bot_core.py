@@ -10,7 +10,12 @@ from playwright.async_api import BrowserContext, Locator, Page, Playwright, asyn
 
 from playwright_automation import actions, facebook_graph
 from playwright_automation.actions import ReactionType
-from playwright_automation.facebook_graph import FollowStatus, FriendRequestStatus
+from playwright_automation.facebook_graph import (
+    DEFAULT_MIN_AUDIENCE,
+    DEFAULT_MIN_FRIENDS,
+    FollowStatus,
+    FriendRequestStatus,
+)
 from playwright_automation.stealth_config import StealthBundle, apply_stealth_to_context, build_stealth
 from playwright_automation.user_agent_rotation import UserAgentRotator
 
@@ -114,24 +119,77 @@ class BaseBot:
             hover_open_ms=hover_open_ms,
         )
 
+    async def share_post(
+        self,
+        page: Page,
+        post_element: Locator | str,
+        *,
+        target: actions.ShareTarget = "auto",
+        post_text: str | None = None,
+        caption: str | None = None,
+    ) -> bool:
+        """Share to Facebook feed and/or a group (brain picks group when needed)."""
+        return await actions.share_post(
+            page,
+            post_element,
+            target=target,
+            post_text=post_text,
+            caption=caption,
+        )
+
     async def send_friend_request(
         self,
         profile_url: str,
         *,
         page: Page | None = None,
         navigation_timeout: float = 60_000,
+        min_friends: int = DEFAULT_MIN_FRIENDS,
+        min_audience: int | None = None,
     ) -> FriendRequestStatus:
         """
         Open a Facebook profile and send a friend request only if the UI still shows **Add Friend**.
 
-        Skips when a request is already pending, you are already friends, or the profile is not
-        friending-eligible. Raises :class:`AccountRestrictedError` if a restriction dialog appears.
+        Skips when friends/followers are below threshold (default 3000). Raises
+        :class:`AccountRestrictedError` if a restriction dialog appears.
         """
         return await facebook_graph.send_friend_request(
             self.context,
             profile_url,
             page=page,
             navigation_timeout=navigation_timeout,
+            min_friends=min_friends,
+            min_audience=min_audience,
+        )
+
+    async def send_friend_requests_from_suggestions(
+        self,
+        *,
+        page: Page | None = None,
+        min_friends: int = DEFAULT_MIN_FRIENDS,
+        min_audience: int | None = None,
+        max_send: int = 4,
+        scroll_rounds: int | None = None,
+        stalk_min: int | None = None,
+        stalk_max: int | None = None,
+        return_to_feed_after: bool = True,
+    ) -> int:
+        """Scroll ≥50×, stalk 2–4 profiles, send when friends/followers ≥ threshold."""
+        kwargs: dict = {
+            "min_friends": min_friends,
+            "min_audience": min_audience,
+            "max_send": max_send,
+        }
+        if scroll_rounds is not None:
+            kwargs["scroll_rounds"] = scroll_rounds
+        if stalk_min is not None:
+            kwargs["stalk_min"] = stalk_min
+        if stalk_max is not None:
+            kwargs["stalk_max"] = stalk_max
+        kwargs["return_to_feed_after"] = return_to_feed_after
+        return await facebook_graph.send_friend_requests_from_suggestions(
+            self.context,
+            page=page,
+            **kwargs,
         )
 
     async def accept_pending_requests(
@@ -141,11 +199,12 @@ class BaseBot:
         requests_url: str = "https://www.facebook.com/friends/requests",
         navigation_timeout: float = 60_000,
         max_accept: int = 60,
+        min_friends: int = DEFAULT_MIN_FRIENDS,
+        min_audience: int | None = None,
     ) -> int:
         """
-        Visit the friend-requests page and confirm pending rows until no **Confirm** button remains.
+        Confirm only users with ≥ threshold friends **or** followers, then return to feed.
 
-        Re-queries the button each time so already-accepted rows are not clicked repeatedly.
         Raises :class:`AccountRestrictedError` if a restriction dialog appears.
         """
         return await facebook_graph.accept_pending_requests(
@@ -154,6 +213,8 @@ class BaseBot:
             requests_url=requests_url,
             navigation_timeout=navigation_timeout,
             max_accept=max_accept,
+            min_friends=min_friends,
+            min_audience=min_audience,
         )
 
     async def follow_page(

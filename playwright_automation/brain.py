@@ -3,7 +3,7 @@ Local LLM integration via Ollama (e.g. Llama 3.1) for post comments/reactions an
 
 Requires Ollama running (default ``http://127.0.0.1:11434``) and a pulled model, e.g.::
 
-    ollama pull llama3.1
+    ollama pull llama3.1:8b
 """
 
 from __future__ import annotations
@@ -17,9 +17,16 @@ from typing import Any
 import httpx
 
 from playwright_automation.actions import ReactionType
+from playwright_automation.ai_comment import (
+    clean_post_text,
+    comment_is_too_generic,
+    comment_matches_post_language,
+    comment_seems_relevant,
+    detect_post_language,
+)
 
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-DEFAULT_MODEL = "llama3.1"
+DEFAULT_MODEL = "llama3.1:8b"
 
 
 class BrainError(RuntimeError):
@@ -58,6 +65,7 @@ def _chat(
     }
     if format_json:
         body["format"] = "json"
+    body["options"] = {"temperature": 0.35, "top_p": 0.9}
 
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -123,17 +131,40 @@ def analyze_post_and_respond(
     where ``reaction_type`` is one of: like, love, care, haha, wow, sad, angry.
     """
     allowed = ", ".join(rt.value for rt in ReactionType)
-    system = (
-        "You help draft Facebook-style engagement. Be warm, concise, and human — no hashtags, "
-        "no emojis unless one fits naturally, no lecturing. Output valid JSON only."
-    )
-    user = (
-        "Read this social post and decide a suitable short public comment (1–2 sentences max, "
-        "under 220 characters) and one reaction type for the Like button.\n\n"
-        f"Allowed reaction_type values exactly: {allowed}\n\n"
-        'Respond as JSON: {"comment": "<text>", "reaction_type": "<one of allowed>"}\n\n'
-        f"Post:\n{post_text.strip()}"
-    )
+    snippet = clean_post_text(post_text.strip(), max_chars=450)
+    if not snippet:
+        snippet = post_text.strip()[:450]
+    lang = detect_post_language(snippet)
+    if lang == "bn":
+        system = (
+            "তুমি Facebook পোস্টে মানুষের মতো প্রতিক্রিয়া লেখো। কমেন্ট **শুধু বাংলায়**। "
+            "কমেন্ট অবশ্যই পোস্টের **আসল বিষয়** নিয়ে হবে — পোস্টে যা লেখা সেটার সাথে "
+            "সরাসরি সম্পর্কিত। অন্য বিষয় (প্রেম, রাগ, রাজনীতি) উদ্ভাবনা করবে না যদি "
+            "পোস্টে না থাকে। সাধারণ 'শুভেচ্ছা' শুধু শুভেচ্ছা/জন্মদিন পোস্টে। "
+            "হ্যাশট্যাগ নয়। শুধু valid JSON।"
+        )
+        user = (
+            "নিচের পোস্টের **মূল বার্তা** পড়ে সেই বিষয়েই ছোট বাংলা কমেন্ট লেখো "
+            "(২–১২ শব্দ, সর্বোচ্চ ১২০ অক্ষর) এবং reaction_type বেছে নাও।\n\n"
+            f"Allowed reaction_type exactly: {allowed}\n"
+            "Prefer like or love for normal posts; angry only if the post is clearly negative.\n\n"
+            'JSON only: {"comment": "<বাংলা কমেন্ট>", "reaction_type": "<one of allowed>"}\n\n'
+            f"Post:\n{snippet}"
+        )
+    else:
+        system = (
+            "You draft Facebook engagement. English only. The comment MUST directly "
+            "address what the post is actually about — do not invent unrelated topics. "
+            "No generic 'Nice post!' on specific content. No hashtags. JSON only."
+        )
+        user = (
+            "Read the post below and write a short English comment (2–12 words) that "
+            "clearly relates to the post's topic, plus one reaction_type.\n\n"
+            f"Allowed reaction_type exactly: {allowed}\n"
+            "Prefer like or love; angry only if the post is clearly negative.\n\n"
+            'JSON only: {"comment": "<English comment>", "reaction_type": "<one of allowed>"}\n\n'
+            f"Post:\n{snippet}"
+        )
 
     raw = _chat(
         [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -150,10 +181,181 @@ def analyze_post_and_respond(
     if not comment:
         raise BrainError(f"Model returned empty comment. Payload: {payload!r}")
 
+    if not comment_matches_post_language(comment, snippet):
+        raise BrainError(
+            f"Model comment language mismatch (expected {lang}): {comment!r}",
+        )
+
+    if comment_is_too_generic(comment, snippet):
+        raise BrainError(f"Model comment too generic for post: {comment!r}")
+
+    if not comment_seems_relevant(comment, snippet):
+        raise BrainError(f"Model comment off-topic for post: {comment!r}")
+
     if len(comment) > 400:
         comment = comment[:397] + "..."
 
     return PostAnalysis(comment=comment, reaction_type=reaction)
+
+
+def analyze_post_focused(
+    post_text: str,
+    *,
+    keywords: list[str] | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+    timeout: float = 90.0,
+) -> PostAnalysis:
+    """
+    Second-pass Ollama call: force a comment that mentions the post topic / keywords.
+    """
+    allowed = ", ".join(rt.value for rt in ReactionType)
+    snippet = clean_post_text(post_text.strip(), max_chars=450)
+    if not snippet:
+        snippet = post_text.strip()[:450]
+    lang = detect_post_language(snippet)
+    kw_hint = ", ".join(keywords or []) or snippet[:80]
+
+    if lang == "bn":
+        system = (
+            "তুমি Facebook পোস্ট পড়ে **নির্দিষ্ট** বাংলা কমেন্ট লেখো। "
+            "'ভালো', 'সুন্দর পোস্ট', 'চমৎকার' একা লিখবে না। "
+            "পোস্টের বিষয় বা নাম/জায়গা/ঘটনা উল্লেখ করো। শুধু JSON।"
+        )
+        user = (
+            f"পোস্টের মূল শব্দ/বিষয়: {kw_hint}\n\n"
+            "এই পোস্টের **বিষয়** নিয়ে ২–১৫ শব্দের বাংলা কমেন্ট + reaction_type।\n"
+            f"Allowed reaction_type: {allowed}\n"
+            'JSON: {"comment": "...", "reaction_type": "..."}\n\n'
+            f"Post:\n{snippet}"
+        )
+    else:
+        system = (
+            "Write a specific English Facebook comment about THIS post. "
+            "Forbidden alone: Nice post, Good, Wow, Well said. "
+            "Mention the topic or a detail from the post. JSON only."
+        )
+        user = (
+            f"Key topics from post: {kw_hint}\n\n"
+            "Short English comment (2–15 words) that clearly refers to the post, "
+            f"plus reaction_type from: {allowed}\n"
+            'JSON: {"comment": "...", "reaction_type": "..."}\n\n'
+            f"Post:\n{snippet}"
+        )
+
+    raw = _chat(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        model=model,
+        base_url=base_url,
+        timeout=timeout,
+        format_json=True,
+    )
+    payload = _extract_json_object(raw)
+    comment = str(payload.get("comment", "")).strip()
+    reaction = _coerce_reaction(str(payload.get("reaction_type", "like")))
+    if not comment:
+        raise BrainError("Focused model returned empty comment.")
+    if not comment_matches_post_language(comment, snippet):
+        raise BrainError(f"Focused comment language mismatch: {comment!r}")
+    if comment_is_too_generic(comment, snippet):
+        raise BrainError(f"Focused comment still generic: {comment!r}")
+    if not comment_seems_relevant(comment, snippet):
+        raise BrainError(f"Focused comment off-topic: {comment!r}")
+    if len(comment) > 400:
+        comment = comment[:397] + "..."
+    return PostAnalysis(comment=comment, reaction_type=reaction)
+
+
+def pick_share_group(
+    post_text: str,
+    group_names: list[str],
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    timeout: float = 60.0,
+) -> str | None:
+    """Return one group name from ``group_names`` that best fits the post (or None)."""
+    groups = [g.strip() for g in group_names if (g or "").strip()][:25]
+    if not groups:
+        return None
+    snippet = (post_text or "").strip()[:400]
+    system = (
+        "Pick exactly ONE Facebook group from the list that best matches the post topic. "
+        "Output JSON only: {\"group_name\": \"<exact name from list>\"}"
+    )
+    user = (
+        f"Post:\n{snippet or '(no text)'}\n\nGroups:\n"
+        + "\n".join(f"- {g}" for g in groups)
+    )
+    try:
+        raw = _chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            format_json=True,
+        )
+        payload = _extract_json_object(raw)
+        gn = str(payload.get("group_name", "")).strip()
+        for g in groups:
+            if g.lower() == gn.lower() or gn.lower() in g.lower():
+                return g
+        return gn if gn else None
+    except Exception:
+        return groups[0] if groups else None
+
+
+def decide_share_destination(
+    post_text: str,
+    group_names: list[str],
+    *,
+    model: str | None = None,
+    base_url: str | None = None,
+    timeout: float = 60.0,
+) -> dict[str, str | None]:
+    """
+  Pick share target: ``timeline`` (Facebook feed/profile) or ``group`` with a group name.
+
+    Returns ``{"target": "timeline"|"group", "group_name": str|None}``.
+    """
+    groups = [g.strip() for g in group_names if (g or "").strip()][:25]
+    snippet = (post_text or "").strip()[:400]
+    if not groups:
+        return {"target": "timeline", "group_name": None}
+
+    system = (
+        "You choose where to share a Facebook post. Output JSON only. "
+        "Pick \"timeline\" for general posts (Share to Facebook / news feed). "
+        "Pick \"group\" only when the post clearly fits one listed group "
+        "(topic match). If unsure, prefer timeline."
+    )
+    user = (
+        f"Post:\n{snippet or '(no text)'}\n\n"
+        f"Groups you may share to:\n"
+        + "\n".join(f"- {g}" for g in groups)
+        + '\n\nJSON: {"target": "timeline"|"group", "group_name": "<exact name or null>"}'
+    )
+    try:
+        raw = _chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            model=model,
+            base_url=base_url,
+            timeout=timeout,
+            format_json=True,
+        )
+        payload = _extract_json_object(raw)
+    except Exception:
+        return {"target": "timeline", "group_name": None}
+
+    target = str(payload.get("target", "timeline")).strip().lower()
+    group_name = payload.get("group_name")
+    if target == "group" and group_name:
+        gn = str(group_name).strip()
+        for g in groups:
+            if g.lower() == gn.lower() or gn.lower() in g.lower():
+                return {"target": "group", "group_name": g}
+        return {"target": "group", "group_name": gn}
+    return {"target": "timeline", "group_name": None}
 
 
 def handle_chat(

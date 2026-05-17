@@ -53,6 +53,8 @@ load_dotenv(_ROOT / ".env", override=False)
 
 from playwright_automation.actions import click_feed_tab, human_like_scroll, random_delay  # noqa: E402
 from playwright_automation.bot_core import BaseBot  # noqa: E402
+from playwright_automation.actions import return_to_feed  # noqa: E402
+from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E402
 from playwright_automation.facebook_login import (  # noqa: E402
     looks_like_checkpoint,
     stealthy_facebook_login,
@@ -239,11 +241,13 @@ async def _cooldown(
 
 
 async def _activity_loop(
+    bot: BaseBot,
     page: Page,
     stop: asyncio.Event,
     *,
     like_chance: float,
     comment_chance: float,
+    friend_chance: float,
     cooldown_after_n: int,
     cooldown_min_min: float,
     cooldown_max_min: float,
@@ -291,7 +295,7 @@ async def _activity_loop(
             log.exception("Engagement pass crashed: %s", exc)
             results = []
 
-        new_interactions = sum(1 for r in results if r.liked or r.commented)
+        new_interactions = sum(1 for r in results if r.liked or r.commented or r.shared)
         interactions_since_break += new_interactions
         if len(results) == 0:
             empty_passes += 1
@@ -304,8 +308,40 @@ async def _activity_loop(
             new_interactions,
             state.reactions,
             state.comments,
+            state.shares,
             state.interactions,
         )
+
+        if random.random() < friend_chance:
+            try:
+                sent = await bot.send_friend_requests_from_suggestions(
+                    page=page,
+                    min_audience=DEFAULT_MIN_AUDIENCE,
+                    max_send=2,
+                )
+                if sent:
+                    log.info(
+                        "Sent %d friend request(s) (≥%d friends/followers)",
+                        sent,
+                        DEFAULT_MIN_AUDIENCE,
+                    )
+            except Exception as exc:
+                log.debug("Friend send skipped: %s", exc)
+            try:
+                accepted = await bot.accept_pending_requests(
+                    page=page,
+                    min_audience=DEFAULT_MIN_AUDIENCE,
+                    max_accept=2,
+                )
+                if accepted:
+                    log.info(
+                        "Accepted %d friend request(s) (≥%d friends/followers)",
+                        accepted,
+                        DEFAULT_MIN_AUDIENCE,
+                    )
+            except Exception as exc:
+                log.debug("Friend accept skipped: %s", exc)
+            await return_to_feed(page, log=log)
 
         # Step 3: cooldown after every N interactions.
         if interactions_since_break >= cooldown_after_n:
@@ -530,10 +566,12 @@ async def _run(args: argparse.Namespace) -> None:
             args.cooldown_after,
         )
         await _activity_loop(
+            bot,
             page,
             stop,
             like_chance=args.like_chance,
             comment_chance=args.comment_chance,
+            friend_chance=args.friend_chance,
             cooldown_after_n=args.cooldown_after,
             cooldown_min_min=args.cooldown_min_min,
             cooldown_max_min=args.cooldown_max_min,
@@ -579,6 +617,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument("--like-chance", type=float, default=0.70, help="Probability of Like per post (0..1)")
     p.add_argument("--comment-chance", type=float, default=0.75, help="Probability of AI comment per post (0..1)")
+    p.add_argument(
+        "--friend-chance",
+        type=float,
+        default=0.10,
+        help="Probability per pass of friend send/accept (only users with ≥3000 friends)",
+    )
     p.add_argument("--max-posts-per-pass", type=int, default=5, help="Max posts to process before re-scrolling")
     p.add_argument("--cooldown-after", type=int, default=5, help="Take a break after this many interactions")
     p.add_argument("--cooldown-min-min", type=float, default=5.0, help="Cooldown minimum minutes")

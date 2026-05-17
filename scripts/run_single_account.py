@@ -8,10 +8,10 @@ Default target account is ``100001514018857`` / ``123456`` (matches the row in
 
 Activities performed in a continuous loop:
 
-- Human-like scrolling of the feed (curved mouse paths, variable speed).
-- Occasional feed reaction (Like / Love / Haha / …) on a visible post (low probability).
-- Periodic light pauses ("thinking time") to avoid robotic cadence.
-- Optional drift visits to the own profile / notifications page.
+- Feed reactions (Like / Love / Haha / …) and comments (Ollama brain or Gemini).
+- Occasional share; rare friend send/accept (≥3k friends/followers).
+- Human-like scrolling without jumping back to the top each cycle.
+- Short pauses between cycles (a few seconds, not tens of seconds).
 
 Run::
 
@@ -31,25 +31,38 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+load_dotenv(_ROOT / ".env", override=False)
+
 from playwright_automation.actions import (  # noqa: E402
     ReactionType,
     click_feed_tab,
+    comment_on_post,
+    create_feed_post,
     human_scroll,
     react_to_post,
     random_delay,
+    return_to_feed,
+    share_post,
 )
-from playwright_automation.ai_comment import pick_reaction_for_post  # noqa: E402
+from playwright_automation.ai_comment import (  # noqa: E402
+    generate_comment_for_post,
+    generate_status_post,
+    pick_reaction_for_post,
+)
 from playwright_automation.bot_core import BaseBot  # noqa: E402
+from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E402
 from playwright_automation.facebook_login import (  # noqa: E402
     looks_like_checkpoint,
     stealthy_facebook_login,
 )
+from playwright_automation.post_engagement import pick_random_visible_post  # noqa: E402
 from playwright_automation.user_agent_rotation import UserAgentRotator  # noqa: E402
 
 _DEFAULT_COOKIES = _ROOT / "cookies.txt"
@@ -57,9 +70,6 @@ _DEFAULT_ACCOUNT_ID = "100001514018857"
 _DEFAULT_PASSWORD = "123456"
 _FEED_URL = "https://www.facebook.com/"
 
-# The cookies in cookies.txt come from a mobile session (wd=360x800,
-# m_pixel_ratio=2, fbl_st). So by default we use a matching mobile profile —
-# otherwise FB detects a "different device" and shows a captcha.
 _MOBILE_USER_AGENTS: tuple[str, ...] = (
     "Mozilla/5.0 (Linux; Android 14; SM-A546B) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
@@ -77,10 +87,6 @@ log = logging.getLogger("single_account")
 
 
 def _parse_account_block_from_cookies(path: Path, target_id: str) -> tuple[str, list[dict[str, Any]]] | None:
-    """Find the block for ``target_id`` in cookies.txt and return ``(password, cookies)``.
-
-    Returns ``None`` if the account is not present in the file.
-    """
     if not path.exists():
         return None
     lines = [ln.strip() for ln in path.read_text(encoding="utf-8", errors="ignore").splitlines() if ln.strip()]
@@ -124,7 +130,6 @@ def _cookie_string_to_dicts(raw: str) -> list[dict[str, Any]]:
 
 
 async def _has_login_form(page: Page) -> bool:
-    """Return True if the page is currently showing a login form (email + password)."""
     try:
         if await page.locator(
             "input#m_login_email, input[name='email'], input[type='email'], input#email"
@@ -136,7 +141,6 @@ async def _has_login_form(page: Page) -> bool:
 
 
 async def _looks_logged_in(page: Page) -> bool:
-    """Heuristic: True when we *see* logged-in chrome (composer / nav / profile shortcut)."""
     import re
 
     if await _has_login_form(page):
@@ -160,52 +164,104 @@ async def _looks_logged_in(page: Page) -> bool:
     return False
 
 
-async def _try_random_like(page: Page, *, log_: logging.Logger) -> bool:
-    """Try to apply a tone-aligned reaction on one visible post; return True if it ran."""
+async def _try_smart_engagement(page: Page, *, rng: random.Random, log_: logging.Logger) -> bool:
+    """React + optional comment on one visible post (brain → Gemini → generic)."""
+    picked = await pick_random_visible_post(page, rng=rng)
+    if picked is None:
+        log_.warning("No feed post found for engagement (scroll or wait for feed to load)")
+        return False
+    post, text = picked
+
+    reaction = pick_reaction_for_post(text, rng)
+    comment_text = await generate_comment_for_post(text)
+    log_.info("Comment (%s): %r", "bn" if any("\u0980" <= c <= "\u09ff" for c in comment_text) else "en", comment_text[:60])
+
     try:
-        posts = page.locator('[role="article"]')
-        count = await posts.count()
-        if count == 0:
-            return False
-        post = posts.nth(random.randint(0, min(count - 1, 6)))
-        if not await post.is_visible(timeout=3000):
-            return False
-        text = ""
-        try:
-            text = (await post.inner_text(timeout=2500) or "").strip()
-        except Exception:
-            text = ""
-        reaction = pick_reaction_for_post(text, random.Random())
-        timeout_sec = 14.0 if reaction != ReactionType.LIKE else 8.0
+        await post.scroll_into_view_if_needed(timeout=4000)
+    except Exception:
+        pass
+    await random_delay(0.4, 1.0)
+
+    timeout_sec = 12.0 if reaction == ReactionType.LIKE else 24.0
+    try:
         await asyncio.wait_for(react_to_post(page, post, reaction), timeout=timeout_sec)
         log_.info("Reacted with %s", reaction.value)
-        return True
-    except asyncio.TimeoutError:
-        log_.debug("Reaction attempt timed out")
-        return False
     except Exception as exc:
-        log_.debug("Reaction attempt skipped: %s", exc)
+        log_.warning("Reaction failed: %s", exc)
         return False
+
+    await random_delay(0.6, 1.4)
+    for attempt in range(1, 4):
+        try:
+            if await comment_on_post(page, post, comment_text):
+                log_.info("Commented: %r", comment_text[:80])
+                return True
+            log_.warning("Comment UI not found (attempt %d/3)", attempt)
+        except Exception as exc:
+            log_.warning("Comment failed (attempt %d/3): %s", attempt, exc)
+        await random_delay(0.8, 1.5)
+    return True
+
+
+async def _try_random_share(page: Page, *, rng: random.Random, log_: logging.Logger) -> bool:
+    picked = await pick_random_visible_post(page, rng=rng)
+    if picked is None:
+        return False
+    post, _ = picked
+    try:
+        ok = await share_post(page, post)
+        if ok:
+            log_.info("Shared a feed post")
+        return ok
+    except Exception as exc:
+        log_.warning("Share skipped: %s", exc)
+        return False
+
+
+async def _maybe_friend_graph_actions(bot: BaseBot, page: Page, *, log_: logging.Logger) -> None:
+    try:
+        sent = await bot.send_friend_requests_from_suggestions(
+            page=page,
+            min_audience=DEFAULT_MIN_AUDIENCE,
+            max_send=4,
+            scroll_rounds=50,
+            stalk_min=2,
+            stalk_max=4,
+        )
+        if sent:
+            log_.info("Sent %d friend request(s)", sent)
+    except Exception as exc:
+        log_.debug("Friend send skipped: %s", exc)
+    try:
+        accepted = await bot.accept_pending_requests(
+            page=page,
+            min_audience=DEFAULT_MIN_AUDIENCE,
+            max_accept=1,
+        )
+        if accepted:
+            log_.info("Accepted %d friend request(s)", accepted)
+    except Exception as exc:
+        log_.debug("Friend accept skipped: %s", exc)
+    await return_to_feed(page, log=log_)
 
 
 async def _maybe_drift_visit(page: Page, *, log_: logging.Logger) -> None:
-    """Occasionally visit notifications / profile for a more human pattern."""
     choice = random.random()
     try:
         if choice < 0.5:
-            await page.goto("https://www.facebook.com/notifications", wait_until="domcontentloaded", timeout=45_000)
-            log_.info("Visited notifications page")
-            await random_delay(3.0, 7.0)
+            await page.goto(
+                "https://www.facebook.com/notifications",
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
+            log_.info("Visited notifications")
         else:
             await page.goto("https://www.facebook.com/me/", wait_until="domcontentloaded", timeout=45_000)
-            log_.info("Visited own profile")
-            await random_delay(3.0, 8.0)
+            log_.info("Visited profile")
+        await random_delay(2.0, 4.0)
     except Exception as exc:
-        log_.debug("Drift visit skipped: %s", exc)
-    try:
-        await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=60_000)
-    except Exception:
-        pass
+        log_.debug("Drift skipped: %s", exc)
+    await return_to_feed(page, log=log_)
 
 
 async def _wait_for_login_or_stop(
@@ -216,18 +272,15 @@ async def _wait_for_login_or_stop(
     poll_sec: float = 4.0,
     max_wait_sec: float = 30 * 60,
 ) -> None:
-    """Wait for the user to resolve a checkpoint/captcha — returns as soon as we look logged in."""
-    log.info("[%s] waiting for manual resolution (max %.0f min, press Ctrl+C to stop)",
-             label, max_wait_sec / 60.0)
+    log.info("[%s] waiting for manual resolution (max %.0f min)", label, max_wait_sec / 60.0)
     start = asyncio.get_event_loop().time()
     while not stop.is_set():
         if (asyncio.get_event_loop().time() - start) > max_wait_sec:
-            log.warning("[%s] manual resolution timed out — script stopping", label)
             stop.set()
             return
         try:
             if await _looks_logged_in(page):
-                log.info("[%s] login confirmed — proceeding to activity", label)
+                log.info("[%s] login confirmed", label)
                 return
         except Exception:
             pass
@@ -242,32 +295,64 @@ async def _activity_loop(
     page: Page,
     stop: asyncio.Event,
     *,
-    like_chance: float,
+    engage_rounds: int,
+    friend_every: int,
     drift_chance: float,
     min_cycle_sec: float,
     max_cycle_sec: float,
 ) -> None:
-    """Continuously do human-like activities until ``stop`` is set."""
+    """Engage on feed first, light scroll, short gap — no feed-tab reset each cycle."""
+    rng = random.Random()
     cycle = 0
     while not stop.is_set():
         cycle += 1
-        log.info("Starting cycle #%d", cycle)
+        log.info("=== Cycle #%d ===", cycle)
 
-        try:
-            segments = random.randint(4, 12)
-            await human_scroll(page, segments=segments)
-            log.info("Scrolled feed (segments=%d)", segments)
-        except Exception as exc:
-            log.warning("Scroll attempt failed: %s", exc)
+        if friend_every > 0 and cycle % friend_every == 0:
+            await _maybe_friend_graph_actions(bot, page, log_=log)
 
-        if random.random() < like_chance:
-            await _try_random_like(page, log_=log)
+        did_something = False
+        for i in range(engage_rounds):
+            if await _try_smart_engagement(page, rng=rng, log_=log):
+                did_something = True
+            else:
+                log_.info("Engagement pass %d/%d — no post", i + 1, engage_rounds)
+            await random_delay(1.5, 3.5)
 
-        if random.random() < drift_chance:
+        if rng.random() < 0.35:
+            if await _try_random_share(page, rng=rng, log_=log):
+                did_something = True
+
+        if cycle % 3 == 0:
+            try:
+                await return_to_feed(page, log=log)
+                status, style = await generate_status_post()
+                if await create_feed_post(page, status):
+                    log.info("Published status (%s): %r", style, status[:80])
+                    did_something = True
+                else:
+                    log.warning("Status post failed")
+            except Exception as exc:
+                log.warning("Status post skipped: %s", exc)
+
+        if rng.random() < drift_chance:
             await _maybe_drift_visit(page, log_=log)
 
+        try:
+            await human_scroll(page, segments=rng.randint(2, 5))
+            log_.info("Scrolled feed (down only, no tab reset)")
+        except Exception as exc:
+            log.warning("Scroll failed: %s", exc)
+
+        if not did_something:
+            log_.warning(
+                "No like/comment this cycle — feed may still be loading; "
+                "waiting briefly then retrying"
+            )
+            await random_delay(2.0, 4.0)
+
         gap = random.uniform(min_cycle_sec, max_cycle_sec)
-        log.info("Waiting %.1fs before next cycle", gap)
+        log.info("Pause %.1fs before next cycle", gap)
         try:
             await asyncio.wait_for(stop.wait(), timeout=gap)
         except asyncio.TimeoutError:
@@ -287,7 +372,7 @@ async def _run(args: argparse.Namespace) -> None:
             password = file_pwd
         log.info("Loaded %d cookie(s) from cookies.txt", len(cookies))
     else:
-        log.warning("Account %s not found in cookies.txt — will try credential-only login", target_id)
+        log.warning("Account %s not found in cookies.txt", target_id)
 
     if not password:
         password = _DEFAULT_PASSWORD
@@ -296,9 +381,6 @@ async def _run(args: argparse.Namespace) -> None:
     profile_dir.mkdir(parents=True, exist_ok=True)
     storage_state = profile_dir / "storage_state.json"
 
-    # The cookies in cookies.txt come from a mobile session. Running them
-    # with a desktop UA makes Facebook detect a "device mismatch" and show a
-    # captcha. So by default we use a mobile profile (UA + viewport + platform).
     if args.mobile:
         ua_pool = _MOBILE_USER_AGENTS
         ua_platform = "Linux armv8l"
@@ -358,122 +440,93 @@ async def _run(args: argparse.Namespace) -> None:
             pass
 
     try:
-        log.info("Navigating to Facebook home (not /login directly — that's a bot signal)...")
+        log.info("Navigating to Facebook home...")
         try:
             await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=60_000)
         except PlaywrightTimeoutError:
-            log.warning("First navigation timed out — continuing anyway")
+            log.warning("First navigation timed out — continuing")
 
-        # Small wait to let JS settle — like a human looking at the page after load.
         await asyncio.sleep(random.uniform(1.8, 3.2))
 
         if await looks_like_checkpoint(page):
-            log.warning(
-                "Facebook is showing a checkpoint/captcha page. "
-                "Solve it manually in the browser — the script is waiting."
-            )
             await _wait_for_login_or_stop(page, stop, label="checkpoint")
         elif await _looks_logged_in(page):
-            log.info("Cookies were enough — logged in (no credentials typed)")
+            log.info("Logged in via cookies")
         else:
-            log.info("Cookies did not log us in — typing credentials slowly like a human...")
-            # Small "reading the page" delay before typing.
             await random_delay(1.2, 2.8)
             outcome = await stealthy_facebook_login(
-                page,
-                email=target_id,
-                password=password,
-                home_url=_FEED_URL,
+                page, email=target_id, password=password, home_url=_FEED_URL,
             )
-            log.info("Stealth login outcome: %s", outcome)
-
-            if outcome == "checkpoint":
-                log.warning(
-                    "Facebook is now asking for a captcha/checkpoint — browser is left "
-                    "open for manual resolution. The script will keep waiting."
-                )
-                await _wait_for_login_or_stop(page, stop, label="checkpoint after submit")
-            elif outcome == "no_form":
-                log.warning(
-                    "Could not locate a login form — Facebook may be showing an "
-                    "interstitial page. Proceed manually in the browser."
-                )
-                await _wait_for_login_or_stop(page, stop, label="no form")
-
-            if await looks_like_checkpoint(page):
-                log.warning("Checkpoint page appeared after submit — waiting for manual resolution...")
-                await _wait_for_login_or_stop(page, stop, label="post-submit checkpoint")
-            elif await _looks_logged_in(page):
-                log.info("Credential login succeeded")
-            else:
-                log.warning(
-                    "Login state is uncertain — not starting activity for safety. "
-                    "Complete login manually in the browser and the script will resume."
-                )
-                await _wait_for_login_or_stop(page, stop, label="login uncertain")
+            log.info("Login outcome: %s", outcome)
+            if outcome in ("checkpoint", "no_form") or not await _looks_logged_in(page):
+                await _wait_for_login_or_stop(page, stop, label="login")
 
         if stop.is_set():
             return
 
-        # Post-login: one human-style tap on the mobile FB "feed" tab
-        # (or the desktop Home nav as a fallback). Mirrors a real user
-        # opening the app and pressing Home before scrolling.
-        log.info("Clicking the feed tab once before starting activity...")
+        log.info("Opening feed tab once...")
         try:
             if await click_feed_tab(page, log=log):
-                await random_delay(1.4, 2.6)
+                await random_delay(1.2, 2.0)
         except Exception as exc:
-            log.warning("Feed tab click skipped due to error: %s", exc)
+            log.warning("Feed tab skipped: %s", exc)
 
-        log.info("Starting human-like activity. Press Ctrl+C to stop.")
+        await random_delay(2.0, 4.0)
+
+        log.info(
+            "Starting activity (engage_rounds=%d, pause %.0f–%.0fs). Ctrl+C to stop.",
+            args.engage_rounds,
+            args.min_cycle_sec,
+            args.max_cycle_sec,
+        )
         await _activity_loop(
             bot,
             page,
             stop,
-            like_chance=args.like_chance,
+            engage_rounds=args.engage_rounds,
+            friend_every=args.friend_every,
             drift_chance=args.drift_chance,
             min_cycle_sec=args.min_cycle_sec,
             max_cycle_sec=args.max_cycle_sec,
         )
     finally:
-        log.info("Saving browser session and shutting down...")
+        log.info("Saving session...")
         try:
             await bot.stop(persist_storage_state=True)
         except Exception as exc:
-            log.warning("Shutdown error (ignored): %s", exc)
+            log.warning("Shutdown error: %s", exc)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--account-id", default=_DEFAULT_ACCOUNT_ID, help="Facebook account ID / email")
-    p.add_argument("--password", default="", help="Password (leave empty to read from cookies.txt)")
-    p.add_argument("--cookies-file", default=str(_DEFAULT_COOKIES), help="Path to cookies.txt")
-    p.add_argument("--headless", action="store_true", help="Headless mode (default: window is shown)")
-    p.add_argument("--timezone", default="Asia/Dhaka", help="Browser timezone")
-    p.add_argument("--width", type=int, default=1280, help="Desktop viewport width (when --no-mobile)")
-    p.add_argument("--height", type=int, default=800, help="Desktop viewport height (when --no-mobile)")
+    p.add_argument("--account-id", default=_DEFAULT_ACCOUNT_ID)
+    p.add_argument("--password", default="")
+    p.add_argument("--cookies-file", default=str(_DEFAULT_COOKIES))
+    p.add_argument("--headless", action="store_true")
+    p.add_argument("--timezone", default="Asia/Dhaka")
+    p.add_argument("--width", type=int, default=1280)
+    p.add_argument("--height", type=int, default=800)
+    p.add_argument("--mobile", dest="mobile", action="store_true", default=True)
+    p.add_argument("--no-mobile", dest="mobile", action="store_false")
     p.add_argument(
-        "--mobile",
-        dest="mobile",
-        action="store_true",
-        default=True,
-        help="Mobile UA + 360x800 viewport (default — matches the cookies.txt mobile session)",
+        "--engage-rounds",
+        type=int,
+        default=2,
+        help="Like/comment attempts per cycle (default 2)",
     )
     p.add_argument(
-        "--no-mobile",
-        dest="mobile",
-        action="store_false",
-        help="Use desktop UA + viewport (may trigger a captcha due to device mismatch)",
+        "--friend-every",
+        type=int,
+        default=8,
+        help="Run friend send/accept every N cycles (0=off, default 8)",
     )
-    p.add_argument("--like-chance", type=float, default=0.18, help="Probability of a Like on each cycle")
-    p.add_argument("--drift-chance", type=float, default=0.08, help="Probability of visiting notifications/profile")
-    p.add_argument("--min-cycle-sec", type=float, default=18.0, help="Minimum seconds between cycles")
-    p.add_argument("--max-cycle-sec", type=float, default=55.0, help="Maximum seconds between cycles")
+    p.add_argument("--drift-chance", type=float, default=0.05)
+    p.add_argument("--min-cycle-sec", type=float, default=4.0, help="Min pause between cycles")
+    p.add_argument("--max-cycle-sec", type=float, default=10.0, help="Max pause between cycles")
     return p.parse_args(argv)
 
 
 def _force_utf8_streams() -> None:
-    """On Windows the default cp1252 stdout cannot print Unicode emojis; force UTF-8."""
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
         reconfigure = getattr(stream, "reconfigure", None)
@@ -495,7 +548,7 @@ def main(argv: list[str] | None = None) -> None:
     try:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
-        log.info("Stopped by user — bye!")
+        log.info("Stopped by user")
 
 
 if __name__ == "__main__":
