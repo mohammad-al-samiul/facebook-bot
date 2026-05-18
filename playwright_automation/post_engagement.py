@@ -32,13 +32,18 @@ from playwright_automation.actions import (
     ReactionType,
     comment_on_post,
     human_like_scroll,
+    human_scroll,
     random_delay,
     react_to_post,
+    recover_one_step_back,
+    recover_until_feed,
     share_post,
 )
 from playwright_automation.ai_comment import (
     clean_post_text,
     generate_comment_for_post,
+    is_commentable_feed_post,
+    is_usable_post_snippet,
     pick_reaction_for_post,
 )
 
@@ -121,7 +126,8 @@ _EXTRACT_STORY_JS: Final[str] = """
     const nodes = el.querySelectorAll(sel);
     for (const n of nodes) {
       const t = (n.innerText || '').trim();
-      if (t.length > 12 && !/^(Like|Comment|Share|লাইক|মন্তব্য)/i.test(t)) {
+      if (t.length > 12 && !/^(Like|Comment|Share|লাইক|মন্তব্য)/i.test(t)
+          && !/what'?s on your mind|create a post|suggested pages for you|আপনার মনে কী/i.test(t)) {
         return t;
       }
     }
@@ -129,11 +135,64 @@ _EXTRACT_STORY_JS: Final[str] = """
   let best = '';
   for (const n of el.querySelectorAll('[dir="auto"]')) {
     const t = (n.innerText || '').trim();
-    if (t.length > best.length && t.length < 800) best = t;
+    if (t.length > best.length && t.length < 800
+        && !/what'?s on your mind|create a post|suggested pages for you|আপনার মনে কী/i.test(t)) {
+      best = t;
+    }
   }
   return best;
 }
 """
+
+_IS_TOP_LEVEL_POST_JS: Final[str] = """
+(el) => {
+  if (!el) return false;
+  const nested = el.querySelectorAll('[role="article"]');
+  if (nested.length > 1) return false;
+  const t = (el.innerText || '').slice(0, 500);
+  if (/shared a post|shared this|commented on|শেয়ার করেছেন|মন্তব্য করেছেন/i.test(t)) {
+    return false;
+  }
+  const likes = el.querySelectorAll('[aria-label*="Like" i][role="button"]');
+  return likes.length >= 1 && likes.length <= 4;
+}
+"""
+
+
+_POST_IS_STORY_OR_REEL_JS: Final[str] = """
+(el) => {
+  const root = el.closest('[role="article"]') || el.closest('[data-pe-post]') || el;
+  if (!root) return false;
+  for (const a of root.querySelectorAll('a[href]')) {
+    const h = (a.getAttribute('href') || '').toLowerCase();
+    if (h.includes('story.php') || h.includes('/reel/') || h.includes('/reels/')) return true;
+  }
+  const t = (root.innerText || '').toLowerCase();
+  if (/\\b(reels?|#reel)\\b/.test(t) && root.querySelector('video')) return true;
+  return false;
+}
+"""
+
+
+async def post_is_story_or_reel(post: Locator) -> bool:
+    """Reels/stories use a different share UI — skip for timeline repost flow."""
+    try:
+        handle = await post.element_handle(timeout=1_500)
+        if handle is None:
+            return False
+        return bool(await handle.evaluate(_POST_IS_STORY_OR_REEL_JS))
+    except Exception:
+        return False
+
+
+async def _post_is_top_level_feed_post(post: Locator) -> bool:
+    try:
+        handle = await post.element_handle(timeout=1_500)
+        if handle is None:
+            return True
+        return bool(await handle.evaluate(_IS_TOP_LEVEL_POST_JS))
+    except Exception:
+        return True
 
 
 async def _post_text_snippet(post: Locator, *, max_chars: int = 600) -> str:
@@ -332,7 +391,9 @@ async def engage_with_next_posts(
             continue
 
         text = await _post_text_snippet(post)
-        if not text:
+        if not text or not is_commentable_feed_post(text):
+            continue
+        if not await _post_is_top_level_feed_post(post):
             continue
         fp = _fingerprint(text)
         if fp in state.seen_fingerprints:
@@ -436,8 +497,8 @@ async def engage_with_next_posts(
         if share_roll < share_probability:
             try:
                 shared = await asyncio.wait_for(
-                    share_post(page, post),
-                    timeout=25.0,
+                    share_post(page, post, target="timeline", post_text=text),
+                    timeout=45.0,
                 )
                 if shared:
                     result.shared = True
@@ -491,23 +552,131 @@ async def pick_random_visible_post(
     page: Page,
     *,
     rng: random.Random | None = None,
+    exclude_fingerprints: frozenset[str] | set[str] | None = None,
+    prefer_lower: bool = True,
 ) -> tuple[Locator, str] | None:
-    """Return a visible feed post locator and text snippet (mobile Like-anchor fallback)."""
+    """
+    Return a visible feed post locator and text snippet (mobile Like-anchor fallback).
+
+    When ``prefer_lower`` is True (default), prefers posts lower on the screen
+  (later in the DOM list) so scrolling down surfaces fresher content first.
+    """
     r = rng if rng is not None else random.Random()
-    posts = await _iter_post_locators(page, 14)
+    skip = exclude_fingerprints or frozenset()
+    posts = await _iter_post_locators(page, 18)
     if not posts:
         return None
-    r.shuffle(posts)
-    for post in posts[:10]:
+
+    order = list(posts[:14])
+    if prefer_lower:
+        # Bottom-of-viewport posts first (newer after scrolling down).
+        cut = max(1, len(order) // 3)
+        tail = order[cut:]
+        head = order[:cut]
+        r.shuffle(tail)
+        scan = tail + head
+    else:
+        scan = order[:]
+        r.shuffle(scan)
+
+    candidates: list[tuple[Locator, str]] = []
+    for post in scan:
         if not await _post_is_visible(post):
             continue
         text = await _post_text_snippet(post)
-        if text:
-            return post, text
-    for post in posts[:6]:
-        if await _post_is_visible(post):
-            return post, (await _post_text_snippet(post)) or ""
+        if not text or not is_commentable_feed_post(text):
+            continue
+        if not await _post_is_top_level_feed_post(post):
+            continue
+        if _fingerprint(text) in skip:
+            continue
+        candidates.append((post, text))
+
+    if candidates:
+        return r.choice(candidates)
+
+    # Last resort: usable story (still skip nested share cards).
+    for post in scan:
+        if not await _post_is_visible(post):
+            continue
+        text = await _post_text_snippet(post) or ""
+        if not text or _fingerprint(text) in skip:
+            continue
+        if not is_usable_post_snippet(text):
+            continue
+        if not await _post_is_top_level_feed_post(post):
+            continue
+        return post, text
     return None
+
+
+def _is_feed_home_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    if not u or u == "about:blank" or "facebook.com" not in u:
+        return False
+    if any(x in u for x in ("/profile.php", "/friends", "/notifications", "/groups/")):
+        return False
+    path = u.split("facebook.com", 1)[-1].split("?", 1)[0].rstrip("/")
+    return path in ("", "/", "/home.php")
+
+
+async def pick_fresh_visible_post(
+    page: Page,
+    *,
+    rng: random.Random | None = None,
+    exclude_fingerprints: frozenset[str] | set[str] | None = None,
+    max_scroll_attempts: int = 8,
+) -> tuple[Locator, str] | None:
+    """
+    Pick a post we have not engaged with yet, scrolling down when the viewport
+    only contains already-seen posts.
+    """
+    r = rng if rng is not None else random.Random()
+    skip = exclude_fingerprints or frozenset()
+    for attempt in range(1, max_scroll_attempts + 1):
+        picked = await pick_random_visible_post(
+            page,
+            rng=r,
+            exclude_fingerprints=skip,
+            prefer_lower=True,
+        )
+        if picked is not None:
+            return picked
+        logger.info(
+            "All visible posts already seen — scrolling for new posts (%d/%d)",
+            attempt,
+            max_scroll_attempts,
+        )
+        if (page.url or "").strip().lower() in ("", "about:blank"):
+            await recover_until_feed(page, max_steps=1, reason=f"fresh post {attempt}")
+        elif _is_feed_home_url(page.url or ""):
+            try:
+                await human_scroll(page, segments=r.randint(4, 7))
+            except Exception as exc:
+                logger.debug("Feed-home scroll failed: %s", exc)
+        else:
+            await recover_one_step_back(page, reason=f"fresh post {attempt}")
+        await random_delay(0.4, 0.9)
+        try:
+            await human_like_scroll(
+                page,
+                iterations=r.randint(2, 3),
+                min_pixels=600,
+                max_pixels=1_200,
+                min_pause=0.4,
+                max_pause=1.0,
+            )
+        except Exception as exc:
+            logger.debug("Fresh-post scroll failed: %s", exc)
+        await random_delay(0.5, 1.0)
+
+    # Last resort: any commentable post (still skip explicit excludes).
+    return await pick_random_visible_post(
+        page,
+        rng=r,
+        exclude_fingerprints=skip,
+        prefer_lower=True,
+    )
 
 
 __all__ = [
@@ -515,6 +684,8 @@ __all__ = [
     "SessionState",
     "engage_with_next_posts",
     "has_feed_posts",
+    "pick_fresh_visible_post",
     "pick_random_visible_post",
+    "post_is_story_or_reel",
     "pick_reaction_probability_weights",
 ]

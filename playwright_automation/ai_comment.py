@@ -99,6 +99,49 @@ _FB_UI_NOISE_RE: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"\b\d+[hdwm]\b", re.I),
 )
 
+# Feed chrome / composer prompts — not real post bodies (breaks share captions).
+_JUNK_POST_SNIPPET_RE: Final[re.Pattern[str]] = re.compile(
+    r"(what'?s on your mind|create a post|create post|suggested pages for you|"
+    r"suggested for you|people you may know|friend requests|"
+    r"আপনার মনে কী|পোস্ট তৈরি|সাজেস্টেড|পরামর্শকৃত)",
+    re.I,
+)
+
+
+def is_usable_post_snippet(text: str, *, min_chars: int = 12) -> bool:
+    """False for composer chrome, ads shells, and other non-post feed UI."""
+    snippet = clean_post_text((text or "").strip())
+    if len(snippet) < min_chars:
+        return False
+    if _JUNK_POST_SNIPPET_RE.search(snippet):
+        return False
+    return True
+
+
+# Shared posts, comment threads, and card chrome — not a top-level feed story.
+_NESTED_POST_SNIPPET_RE: Final[re.Pattern[str]] = re.compile(
+    r"(shared a post|shared this|shared with you|commented on|replied to|"
+    r"writes on|posted in|photo/video|see more posts|"
+    r"শেয়ার করেছেন|শেয়ার করেছেন|মন্তব্য করেছেন|উত্তর দিয়েছেন)",
+    re.I,
+)
+
+
+def is_commentable_feed_post(text: str, *, min_chars: int = 28) -> bool:
+    """True for a main feed story worth commenting on (not nested share/comment UI)."""
+    snippet = clean_post_text((text or "").strip())
+    if not is_usable_post_snippet(snippet, min_chars=min_chars):
+        return False
+    if _NESTED_POST_SNIPPET_RE.search(snippet):
+        return False
+    # Scraped whole card with nested blocks often has many short lines.
+    if snippet.count("\n") > 6:
+        return False
+    words = [w for w in re.split(r"\s+", snippet) if len(w) > 1]
+    if len(words) < 4:
+        return False
+    return True
+
 
 def clean_post_text(raw: str, *, max_chars: int = 400) -> str:
     """
@@ -852,7 +895,7 @@ async def generate_status_post(
         text = (raw or "").strip().strip('"').strip("'")
         if text and comment_matches_post_language(text, "আ" if use_bn else "Hello"):
             logger.info("Status from Ollama (%s, style=%s): %r", lang, style, text[:80])
-            return text[:400], style
+            return text[:120], style
     except Exception as exc:
         logger.debug("Ollama status failed: %s", exc)
 
@@ -928,13 +971,113 @@ async def generate_comment_for_post(
     return fb
 
 
+def _share_caption_fallback(snippet: str, *, avoid: tuple[str, ...] = ()) -> str:
+    """Offline share caption when LLM is unavailable."""
+    lang = detect_post_language(snippet)
+    keywords = _extract_post_keywords(snippet)
+    avoid_low = {a.lower().strip() for a in avoid if a}
+
+    if keywords:
+        kw = keywords[0]
+        if lang == "bn":
+            templates = (
+                f"{kw} নিয়ে পোস্টটা শেয়ার করলাম — পড়ে দেখুন।",
+                f"এই {kw} বিষয়টা ভালো লেগেছে, শেয়ার করছি।",
+                f"{kw} — মনে হয় অনেকের কাজে লাগবে।",
+            )
+        else:
+            templates = (
+                f"Sharing this — good point about {kw}.",
+                f"Worth a read on {kw}.",
+                f"Thought this take on {kw} was interesting.",
+            )
+        pool = [t for t in templates if t.lower() not in avoid_low]
+        if pool:
+            return random.choice(pool)
+
+    if lang == "bn":
+        pool = (
+            "এটা শেয়ার করলাম — দেখে নিন।",
+            "ভালো লাগল, তাই শেয়ার করছি।",
+            "মনে হয় সবাই পছন্দ করবে।",
+        )
+    else:
+        pool = (
+            "Sharing this — worth a look.",
+            "Thought this was worth sharing.",
+            "Passing this along.",
+        )
+    choices = [t for t in pool if t.lower() not in avoid_low]
+    return random.choice(choices) if choices else pool[0]
+
+
+async def generate_share_caption_for_post(
+    post_text: str,
+    *,
+    timeout: float = 60.0,
+    avoid_captions: tuple[str, ...] = (),
+) -> str:
+    """
+    AI share caption in the **same language** as the post (Bangla or English).
+    """
+    import asyncio
+
+    snippet = clean_post_text((post_text or "").strip(), max_chars=500)
+    if not snippet:
+        return _share_caption_fallback("", avoid=avoid_captions)
+
+    lang = detect_post_language(snippet)
+    keywords = tuple(_extract_post_keywords(snippet))
+    logger.info(
+        "Post for share caption (%s, %d chars, kw=%s): %r",
+        lang,
+        len(snippet),
+        keywords,
+        snippet[:80],
+    )
+
+    def _accept(candidate: str) -> bool:
+        if not candidate or candidate.lower().strip() in {a.lower().strip() for a in avoid_captions}:
+            return False
+        if not comment_matches_post_language(candidate, snippet):
+            return False
+        if comment_is_too_generic(candidate, snippet):
+            return False
+        return comment_seems_relevant(candidate, snippet)
+
+    try:
+        from playwright_automation.brain import generate_share_caption
+
+        for attempt in range(1, 3):
+            try:
+                cap = await asyncio.wait_for(
+                    asyncio.to_thread(generate_share_caption, snippet, keywords=keywords),
+                    timeout=timeout,
+                )
+                if _accept(cap):
+                    logger.info("Share caption from Ollama attempt %d (%s): %r", attempt, lang, cap[:60])
+                    return cap
+                logger.warning("Ollama share caption attempt %d rejected — %r", attempt, cap[:50])
+            except Exception as exc:
+                logger.debug("Ollama share caption attempt %d failed: %s", attempt, exc)
+    except Exception as exc:
+        logger.debug("Ollama share caption import/call failed: %s", exc)
+
+    fb = _share_caption_fallback(snippet, avoid=avoid_captions)
+    logger.info("Share caption %s fallback: %r", lang, fb[:60])
+    return fb
+
+
 __all__ = [
     "clean_post_text",
+    "is_usable_post_snippet",
+    "is_commentable_feed_post",
     "comment_is_too_generic",
     "comment_matches_post_language",
     "comment_seems_relevant",
     "detect_post_language",
     "generate_comment_for_post",
+    "generate_share_caption_for_post",
     "generate_status_post",
     "get_ai_comment",
     "pick_reaction_for_post",

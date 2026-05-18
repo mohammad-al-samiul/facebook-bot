@@ -38,12 +38,14 @@ from playwright_automation.actions import click_feed_tab, random_delay  # noqa: 
 from playwright_automation.agent_executor import (  # noqa: E402
     AgentSession,
     agent_step,
+    browse_feed_warmup,
     force_feed_comment,
     run_structured_cycle,
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-17-human-friends-smart-comments-v10"
+_AGENT_BUILD = "2026-05-18-status-post-fix-v16"
+_DAILY_SHARE_STATE = "daily_share_quota.json"
 from playwright_automation.bot_core import BaseBot  # noqa: E402
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
 from playwright_automation.user_agent_rotation import UserAgentRotator  # noqa: E402
@@ -64,6 +66,84 @@ from scripts.run_single_account import (  # noqa: E402
 log = logging.getLogger("agent_brain_runner")
 
 
+def _load_daily_share_state(profile_dir: Path) -> tuple[str, int, list[str]]:
+    path = profile_dir / _DAILY_SHARE_STATE
+    if not path.is_file():
+        return "", 0, []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return (
+            str(data.get("day", "")),
+            int(data.get("shares_today", 0)),
+            list(data.get("shared_fingerprints", []))[:80],
+        )
+    except Exception:
+        return "", 0, []
+
+
+async def _wait_until_browser_closed(bot: BaseBot, page, log: logging.Logger) -> None:
+    """Keep Chromium open until the user closes the tab/window (not auto-close on script end)."""
+    log.info(
+        "Browser will stay open until you close the Facebook tab/window. "
+        "Press Ctrl+C in this terminal to stop the agent loop only."
+    )
+    while True:
+        try:
+            if page.is_closed():
+                log.info("Browser tab closed — ending session")
+                break
+            ctx = bot.context
+            if ctx is None:
+                break
+            try:
+                if not ctx.pages:
+                    log.info("All browser tabs closed — ending session")
+                    break
+            except Exception:
+                break
+            await asyncio.sleep(0.75)
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            log.debug("wait_until_browser_closed: %s", exc)
+            break
+
+
+def _save_daily_share_state(profile_dir: Path, session) -> None:
+    from playwright_automation.agent_executor import refresh_share_quota_day
+
+    refresh_share_quota_day(session)
+    path = profile_dir / _DAILY_SHARE_STATE
+    try:
+        path.write_text(
+            json.dumps(
+                {
+                    "day": session.share_quota_day,
+                    "shares_today": session.shares_today,
+                    "shared_fingerprints": list(session.shared_post_fingerprints)[-30:],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log.debug("Could not persist daily share state: %s", exc)
+
+
+def _apply_daily_share_state(session, profile_dir: Path) -> None:
+    from datetime import date
+
+    from playwright_automation.agent_executor import refresh_share_quota_day
+
+    day, count, fps = _load_daily_share_state(profile_dir)
+    today = date.today().isoformat()
+    refresh_share_quota_day(session)
+    if day == today:
+        session.shares_today = count
+        session.shared_post_fingerprints = set(fps[-30:])
+        log.info("Loaded daily shares: %d today (persisted)", session.shares_today)
+
+
 async def _agent_loop(
     bot: BaseBot,
     page,
@@ -73,14 +153,21 @@ async def _agent_loop(
     steps_per_burst: int,
     min_pause: float,
     max_pause: float,
+    skip_friends: bool,
     max_friend_send: int,
     max_friend_accept: int,
     feed_rounds: int,
     friend_scroll_rounds: int,
     friend_stalk_min: int,
     friend_stalk_max: int,
+    min_daily_shares: int,
+    feed_warmup_segments: int,
+    profile_dir: Path,
+    feed_pre_warmed: bool = False,
 ) -> None:
     session = AgentSession()
+    session.feed_pre_warmed = feed_pre_warmed
+    _apply_daily_share_state(session, profile_dir)
     cycle_num = 0
     while not stop.is_set():
         cycle_num += 1
@@ -93,13 +180,17 @@ async def _agent_loop(
                 bot,
                 page,
                 session,
+                skip_friends=skip_friends,
                 max_friend_send=max_friend_send,
                 max_friend_accept=max_friend_accept,
                 feed_rounds=feed_rounds,
                 friend_scroll_rounds=friend_scroll_rounds,
                 friend_stalk_min=friend_stalk_min,
                 friend_stalk_max=friend_stalk_max,
+                min_daily_shares=min_daily_shares,
+                feed_warmup_segments=feed_warmup_segments,
             )
+            _save_daily_share_state(profile_dir, session)
         else:
             log.warning(
                 "brain mode: LLM picks actions (may scroll a lot). "
@@ -211,6 +302,7 @@ async def _run(args: argparse.Namespace) -> None:
         except (NotImplementedError, ValueError, RuntimeError):
             pass
 
+    feed_pre_warmed = False
     try:
         await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=60_000)
         await asyncio.sleep(random.uniform(1.5, 3.0))
@@ -223,14 +315,29 @@ async def _run(args: argparse.Namespace) -> None:
 
         await click_feed_tab(page, log=log)
         await random_delay(1.5, 3.0)
+        await browse_feed_warmup(
+            page,
+            scroll_segments=min(max(args.feed_warmup_segments, 4), 6),
+            label="after login",
+        )
+        feed_pre_warmed = True
 
         log.info("Agent build %s | mode=%s | Ctrl+C to stop", _AGENT_BUILD, args.mode)
         if args.mode == "structured":
-            log.info(
-                "structured cycle: friends scroll ≥50 → stalk %d–%d profiles (≥3k) → feed engage",
-                args.friend_stalk_min,
-                args.friend_stalk_max,
-            )
+            if args.skip_friends:
+                log.info(
+                    "structured cycle (feed-only): browse feed → scroll → like → comment → share "
+                    "(goal %d/day) × %d rounds → status post",
+                    args.min_daily_shares,
+                    args.feed_rounds,
+                )
+            else:
+                log.info(
+                    "structured cycle: friends → stalk %d–%d → feed engage × %d",
+                    args.friend_stalk_min,
+                    args.friend_stalk_max,
+                    args.feed_rounds,
+                )
         else:
             log.info("Each brain burst also runs force_feed_comment() before LLM steps")
         await _agent_loop(
@@ -241,15 +348,26 @@ async def _run(args: argparse.Namespace) -> None:
             steps_per_burst=args.steps_per_burst,
             min_pause=args.min_pause,
             max_pause=args.max_pause,
+            skip_friends=args.skip_friends,
             max_friend_send=args.max_friend_send,
             max_friend_accept=args.max_friend_accept,
             feed_rounds=args.feed_rounds,
             friend_scroll_rounds=args.friend_scroll_rounds,
             friend_stalk_min=args.friend_stalk_min,
             friend_stalk_max=args.friend_stalk_max,
+            min_daily_shares=args.min_daily_shares,
+            feed_warmup_segments=args.feed_warmup_segments,
+            profile_dir=profile_dir,
+            feed_pre_warmed=feed_pre_warmed,
         )
+        if args.keep_browser_open:
+            await _wait_until_browser_closed(bot, page, log)
     finally:
-        await bot.stop(persist_storage_state=True)
+        try:
+            if bot.context is not None:
+                await bot.stop(persist_storage_state=True)
+        except Exception as exc:
+            log.debug("Browser shutdown: %s", exc)
 
 
 def main() -> None:
@@ -267,22 +385,58 @@ def main() -> None:
         "--mode",
         choices=("structured", "brain"),
         default="structured",
-        help="structured=friend then feed (default); brain=LLM picks each action",
+        help="structured=feed engagement (default); brain=LLM picks each action",
+    )
+    p.add_argument(
+        "--skip-friends",
+        action="store_true",
+        default=True,
+        help="Skip friends tab scroll/send/accept (default: on)",
+    )
+    p.add_argument(
+        "--friends",
+        dest="skip_friends",
+        action="store_false",
+        help="Re-enable friends suggestions + accept before feed",
     )
     p.add_argument("--max-friend-send", type=int, default=4, help="Max friend requests sent per cycle (≥3k audience)")
     p.add_argument(
         "--friend-scroll-rounds",
         type=int,
-        default=50,
-        help="Scroll rounds on friend suggestions (minimum 50)",
+        default=0,
+        help="Scroll rounds on friend suggestions (disabled)",
     )
     p.add_argument("--friend-stalk-min", type=int, default=2, help="Min profiles to open and check per cycle")
     p.add_argument("--friend-stalk-max", type=int, default=4, help="Max profiles to open and check per cycle")
     p.add_argument("--max-friend-accept", type=int, default=2, help="Friend requests to accept per cycle")
-    p.add_argument("--feed-rounds", type=int, default=3, help="Scroll+like+comment rounds on newsfeed")
+    p.add_argument("--feed-rounds", type=int, default=6, help="Scroll+like+comment+share rounds on newsfeed")
+    p.add_argument(
+        "--feed-warmup-segments",
+        type=int,
+        default=6,
+        help="Feed scroll segments before engagement each cycle (browse-only, max 8)",
+    )
+    p.add_argument(
+        "--min-daily-shares",
+        type=int,
+        default=20,
+        help="Minimum shares per day to own timeline (post-specific caption)",
+    )
     p.add_argument("--steps-per-burst", type=int, default=3, help="(brain mode) steps before pause")
     p.add_argument("--min-pause", type=float, default=5.0)
     p.add_argument("--max-pause", type=float, default=12.0)
+    p.add_argument(
+        "--keep-browser-open",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep browser open until you close the tab (default: on)",
+    )
+    p.add_argument(
+        "--close-on-exit",
+        dest="keep_browser_open",
+        action="store_false",
+        help="Close browser automatically when the script ends",
+    )
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     asyncio.run(_run(p.parse_args()))
 

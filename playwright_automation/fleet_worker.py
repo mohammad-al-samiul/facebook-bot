@@ -198,7 +198,10 @@ async def _try_share_one(
         except Exception:
             pass
         await act.random_delay(0.5, 1.2)
-        ok = await act.share_post(page, post)
+        from playwright_automation.post_engagement import _post_text_snippet
+
+        post_text = await _post_text_snippet(post) or ""
+        ok = await act.share_post(page, post, target="timeline", post_text=post_text)
         if ok:
             log.info("Post shared (post idx=%d)", idx)
             await _safe_log_event(

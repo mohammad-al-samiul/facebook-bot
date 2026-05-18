@@ -9,6 +9,7 @@ import logging
 import random
 import re
 from dataclasses import dataclass, field
+from datetime import date
 
 from playwright.async_api import Page
 
@@ -17,10 +18,17 @@ from playwright_automation.actions import (
     click_feed_tab,
     comment_on_post,
     create_feed_post,
+    human_like_scroll,
     human_scroll,
     random_delay,
     react_to_post,
+    smooth_scroll,
+    resume_feed_after_comment,
+    dismiss_story_view,
+    recover_one_step_back,
+    recover_until_feed,
     return_to_feed,
+    story_view_is_open,
     share_post,
     smooth_scroll,
 )
@@ -33,13 +41,20 @@ from playwright_automation.agent_brain import (
 )
 from playwright_automation.ai_comment import (
     generate_comment_for_post,
+    generate_share_caption_for_post,
     generate_status_post,
     pick_reaction_for_post,
 )
 from playwright_automation.brain import BrainError
 from playwright_automation.bot_core import BaseBot
 from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE, parse_profile_audience_count
-from playwright_automation.post_engagement import has_feed_posts, pick_random_visible_post
+from playwright_automation.post_engagement import (
+    _fingerprint,
+    has_feed_posts,
+    pick_fresh_visible_post,
+    pick_random_visible_post,
+    post_is_story_or_reel,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -72,11 +87,145 @@ class AgentSession:
     posts_this_session: int = 0
     recent_post_styles: list[str] = field(default_factory=list)
     recent_comments: list[str] = field(default_factory=list)
+    recent_share_captions: list[str] = field(default_factory=list)
+    shared_post_fingerprints: set[str] = field(default_factory=set)
+    engaged_post_fingerprints: set[str] = field(default_factory=set)
+    shares_today: int = 0
+    share_quota_day: str = ""
     structured_cycles: int = 0
+    feed_pre_warmed: bool = False
     last_location: LocationType = "newsfeed"
     cycles_on_same_location: int = 0
     steps_off_feed: int = 0
     last_action: str | None = None
+
+
+def _today_key() -> str:
+    return date.today().isoformat()
+
+
+def refresh_share_quota_day(session: AgentSession) -> None:
+    """Reset ``shares_today`` when the calendar day changes."""
+    key = _today_key()
+    if session.share_quota_day != key:
+        session.share_quota_day = key
+        session.shares_today = 0
+        session.shared_post_fingerprints.clear()
+
+
+def shares_remaining_today(session: AgentSession, min_daily_shares: int) -> int:
+    refresh_share_quota_day(session)
+    return max(0, min_daily_shares - session.shares_today)
+
+
+def _post_share_fingerprint(post_text: str) -> str:
+    return _fingerprint(post_text)
+
+
+def _engage_exclude(session: AgentSession) -> set[str]:
+    """Posts already liked or commented this cycle (not shared-only)."""
+    return session.engaged_post_fingerprints
+
+
+def _share_exclude(session: AgentSession) -> set[str]:
+    """Posts already shared today — do not re-share."""
+    return session.shared_post_fingerprints
+
+
+def _reset_cycle_engagement(session: AgentSession) -> None:
+    """Fresh like/comment targets each cycle; shares stay deduped for the day."""
+    session.engaged_post_fingerprints.clear()
+
+
+def _mark_post_engaged(session: AgentSession, post_text: str) -> None:
+    snippet = (post_text or "").strip()
+    if snippet:
+        session.engaged_post_fingerprints.add(_fingerprint(snippet))
+
+
+async def _share_one_to_own_timeline(
+    page: Page,
+    session: AgentSession,
+    *,
+    rng: random.Random,
+    min_daily_shares: int,
+) -> bool:
+    """Share a feed post to the logged-in user's timeline with a post-specific caption."""
+    if shares_remaining_today(session, min_daily_shares) <= 0:
+        return False
+
+    picked = None
+    for _pick_try in range(5):
+        candidate = await pick_fresh_visible_post(
+            page,
+            rng=rng,
+            exclude_fingerprints=_share_exclude(session),
+        )
+        if candidate is None:
+            break
+        post_cand, text_cand = candidate
+        if await post_is_story_or_reel(post_cand):
+            fp_skip = _fingerprint((text_cand or "").strip())
+            if fp_skip:
+                session.shared_post_fingerprints.add(fp_skip)
+            _log.info("Skipping reel/story post for share (pick %d)", _pick_try + 1)
+            await human_scroll(page, segments=rng.randint(2, 4))
+            await random_delay(0.6, 1.2)
+            continue
+        picked = candidate
+        break
+    if picked is None:
+        _log.warning("No fresh post available to share to timeline")
+        return False
+
+    post, post_text = picked
+    snippet = (post_text or "").strip()
+    from playwright_automation.ai_comment import is_commentable_feed_post
+
+    if not snippet or not is_commentable_feed_post(snippet, min_chars=20):
+        _log.warning("Share skipped — need readable post text for caption")
+        return False
+    if re.search(r"#\s*reels?\b|\bwatch\s+reel\b", snippet, re.I):
+        _log.warning("Share skipped — reel post (different share UI)")
+        fp_reel = _post_share_fingerprint(snippet)
+        if fp_reel:
+            session.shared_post_fingerprints.add(fp_reel)
+        return False
+
+    fp = _post_share_fingerprint(snippet)
+    share_cap = await generate_share_caption_for_post(
+        snippet,
+        avoid_captions=tuple(session.recent_share_captions[-8:]),
+    )
+    if not (share_cap or "").strip():
+        _log.warning("Share skipped — empty caption")
+        return False
+    if await share_post(
+        page,
+        post,
+        target="timeline",
+        post_text=post_text,
+        caption=share_cap,
+    ):
+        session.shares_today += 1
+        session.recent_actions.append("share_post")
+        session.recent_share_captions.append(share_cap[:120])
+        if fp:
+            session.shared_post_fingerprints.add(fp)
+            session.engaged_post_fingerprints.add(fp)
+        _log.info(
+            "Shared to own timeline (%d/%d today) caption=%r",
+            session.shares_today,
+            min_daily_shares,
+            share_cap[:60],
+        )
+        await resume_feed_after_comment(page, log=_log, scroll_segments=3)
+        await random_delay(1.0, 2.0)
+        return True
+
+    await recover_one_step_back(page, log=_log, reason="share failed")
+    _log.warning("Timeline share failed (daily %d/%d)", session.shares_today, min_daily_shares)
+    return False
 
 
 def detect_location(url: str) -> LocationType:
@@ -124,8 +273,9 @@ async def _count_pending_friend_requests(page: Page) -> int:
 
 async def ensure_newsfeed_with_posts(page: Page) -> bool:
     """Return to home feed and wait until Like buttons exist."""
-    if await has_feed_posts(page) and detect_location(page.url or "") == "newsfeed":
-        return True
+    if await recover_until_feed(page, log=_log, max_steps=2, reason="ensure feed"):
+        if detect_location(page.url or "") == "newsfeed":
+            return True
 
     _log.info("Feed empty or off-home (%s) — going to newsfeed", (page.url or "")[:90])
     try:
@@ -135,7 +285,11 @@ async def ensure_newsfeed_with_posts(page: Page) -> bool:
     except Exception as exc:
         _log.warning("Navigation to feed failed: %s", exc)
 
-    for _ in range(3):
+    for attempt in range(3):
+        if await has_feed_posts(page):
+            return True
+        await recover_one_step_back(page, log=_log, reason=f"feed recovery {attempt + 1}")
+        await random_delay(0.6, 1.2)
         if await has_feed_posts(page):
             return True
         await human_scroll(page, segments=2)
@@ -218,58 +372,87 @@ async def execute_agent_decision(
     if action == "scroll":
         if not await has_feed_posts(page):
             return await ensure_newsfeed_with_posts(page)
-        await human_scroll(page, segments=random.randint(2, 5))
+        await human_scroll(page, segments=random.randint(4, 9))
         await random_delay(0.8, 1.6)
         return True
 
-    picked = await pick_random_visible_post(page, rng=random.Random())
+    pick_exclude = _share_exclude(session) if action == "share_post" else _engage_exclude(session)
+    picked = await pick_fresh_visible_post(
+        page,
+        rng=random.Random(),
+        exclude_fingerprints=pick_exclude,
+    )
     if picked is None:
-        _log.info("No post locator for %s — recovery scroll on feed", action)
-        await human_scroll(page, segments=2)
+        await human_scroll(page, segments=random.randint(4, 7))
+        picked = await pick_fresh_visible_post(
+            page,
+            rng=random.Random(),
+            exclude_fingerprints=pick_exclude,
+        )
+    if picked is None:
+        _log.info("No fresh post for %s after recovery", action)
+        await human_scroll(page, segments=4)
         return False
     post, text = picked
+    snippet = (text or "").strip()
 
     if action == "like":
         await react_to_post(page, post, ReactionType.LIKE)
         session.likes_this_session += 1
+        _mark_post_engaged(session, snippet)
         await random_delay(0.6, 1.4)
         return True
 
     if action == "comment":
         body = await generate_comment_for_post(
-            text or "Facebook post",
+            snippet or "Facebook post",
             avoid_comments=tuple(session.recent_comments[-8:]),
         )
         for attempt in range(1, 4):
             if await comment_on_post(page, post, body[:400]):
                 session.comments_this_session += 1
                 session.recent_comments.append(body[:120])
-                session.recent_actions.append("comment")
+                _mark_post_engaged(session, snippet)
                 _log.info("Brain comment OK (attempt %d): %r", attempt, body[:60])
                 await random_delay(1.0, 2.0)
                 return True
             _log.warning("Brain comment failed attempt %d/3", attempt)
-            await human_scroll(page, segments=1)
+            await human_scroll(page, segments=3)
             await random_delay(0.8, 1.4)
-            picked = await pick_random_visible_post(page, rng=random.Random())
+            picked = await pick_fresh_visible_post(
+                page,
+                rng=random.Random(),
+                exclude_fingerprints=_engage_exclude(session),
+            )
             if picked:
                 post, text = picked
+                snippet = (text or "").strip()
                 body = await generate_comment_for_post(
-                    (text or "").strip() or "Facebook post",
+                    snippet or "Facebook post",
                     avoid_comments=tuple(session.recent_comments[-8:]),
                 )
         return False
 
     if action == "share_post":
-        share_target = "auto"
-        if decision.action_data.post_content and "group" in decision.action_data.post_content.lower():
-            share_target = "group"
-        return await share_post(
+        cap = await generate_share_caption_for_post(
+            snippet or "Facebook post",
+            avoid_captions=tuple(session.recent_share_captions[-6:]),
+        )
+        ok = await share_post(
             page,
             post,
-            target=share_target,  # type: ignore[arg-type]
+            target="timeline",
             post_text=text,
+            caption=cap,
         )
+        if ok:
+            session.recent_share_captions.append(cap[:120])
+            fp = _post_share_fingerprint(snippet) if snippet else ""
+            if fp:
+                session.shared_post_fingerprints.add(fp)
+                session.engaged_post_fingerprints.add(fp)
+            await resume_feed_after_comment(page, log=_log, scroll_segments=2)
+        return ok
 
     if action == "send_friend_request":
         if decision.target_url:
@@ -338,14 +521,28 @@ async def _engage_one_post(
     do_comment: bool,
 ) -> bool:
     """Like (+ optional comment) on one visible feed post; brain/Gemini for text."""
-    picked = await pick_random_visible_post(page, rng=rng)
+    picked = await pick_fresh_visible_post(
+        page,
+        rng=rng,
+        exclude_fingerprints=_engage_exclude(session),
+    )
     if picked is None:
-        _log.warning("No post locator for engagement")
+        await human_scroll(page, segments=rng.randint(4, 7))
+        await random_delay(0.8, 1.4)
+        picked = await pick_random_visible_post(
+            page,
+            rng=rng,
+            exclude_fingerprints=_engage_exclude(session),
+        )
+    if picked is None:
+        _log.warning("No fresh post for engagement after scroll")
         return False
     post, text = picked
     snippet = (text or "").strip()
-    if not snippet:
-        _log.warning("Post has no readable text — skipping engagement")
+    from playwright_automation.ai_comment import is_commentable_feed_post
+
+    if not snippet or not is_commentable_feed_post(snippet, min_chars=20):
+        _log.warning("Post not suitable for comment (nested/chrome/too short) — skipping")
         return False
 
     # When commenting, use Like (avoids angry/love mismatch from noisy scraped text).
@@ -375,6 +572,7 @@ async def _engage_one_post(
         session.likes_this_session += 1
         session.last_action = "like"
         session.recent_actions.append("like")
+        _mark_post_engaged(session, snippet)
         _log.info("Feed: reacted %s on post", reaction.value)
     except Exception as exc:
         _log.warning("Feed reaction failed: %s", exc)
@@ -389,12 +587,18 @@ async def _engage_one_post(
                 session.recent_comments.append(comment_body[:120])
                 session.last_action = "comment"
                 session.recent_actions.append("comment")
+                _mark_post_engaged(session, snippet)
                 _log.info("Feed: commented %r", comment_body[:60])
                 return True
-            _log.warning("Comment attempt %d/3 failed — scrolling slightly", attempt)
-            await human_scroll(page, segments=1)
+            _log.warning("Comment attempt %d/3 failed — back + scroll for another post", attempt)
+            await recover_one_step_back(page, log=_log, reason=f"comment retry {attempt}")
+            await human_scroll(page, segments=3)
             await random_delay(0.8, 1.5)
-            picked = await pick_random_visible_post(page, rng=rng)
+            picked = await pick_fresh_visible_post(
+                page,
+                rng=rng,
+                exclude_fingerprints=_engage_exclude(session),
+            )
             if picked:
                 post, text = picked
                 snippet = (text or "").strip() or snippet
@@ -403,6 +607,96 @@ async def _engage_one_post(
                     avoid_comments=tuple(session.recent_comments[-8:]),
                 )
     return do_comment is False
+
+
+async def browse_feed_warmup(
+    page: Page,
+    *,
+    rng: random.Random | None = None,
+    scroll_segments: int | None = None,
+    label: str = "warmup",
+) -> None:
+    """
+    Scroll/read the feed like a human **before** any likes or comments.
+    """
+    r = rng if rng is not None else random.Random()
+    segs = scroll_segments if scroll_segments is not None else r.randint(10, 16)
+    _log.info(
+        "======== Feed browse (%s): %d scroll segments — reading only, no comments ========",
+        label,
+        segs,
+    )
+    await random_delay(2.0, 4.0)
+    try:
+        await smooth_scroll(
+            page,
+            total_pixels=r.randint(350, 650),
+            duration_sec=r.uniform(1.6, 2.8),
+        )
+    except Exception as exc:
+        _log.debug("Initial smooth scroll failed: %s", exc)
+    await random_delay(1.5, 3.0)
+
+    for i in range(segs):
+        if r.random() < 0.4:
+            try:
+                await human_like_scroll(
+                    page,
+                    iterations=r.randint(1, 2),
+                    min_pixels=280,
+                    max_pixels=620,
+                    min_pause=2.0,
+                    max_pause=4.5,
+                )
+            except Exception:
+                await human_scroll(page, segments=r.randint(2, 4))
+        else:
+            await human_scroll(page, segments=r.randint(3, 6))
+        if (i + 1) % 4 == 0:
+            _log.info("Feed browse (%s): scrolled %d/%d segments", label, i + 1, segs)
+        await random_delay(1.5, 3.8)
+
+    _log.info("Feed browse (%s) done — starting engagement", label)
+
+
+async def _human_feed_beat(
+    page: Page,
+    session: AgentSession,
+    *,
+    rng: random.Random,
+    min_daily_shares: int,
+    beat_index: int,
+    beat_total: int,
+) -> None:
+    """
+    One natural feed rhythm: scroll & read → like+comment → extra like → share.
+    """
+    _log.info("--- Feed beat %d/%d (scroll → like → comment → share) ---", beat_index, beat_total)
+    await human_scroll(page, segments=rng.randint(3, 6))
+    session.recent_actions.append("scroll")
+    await random_delay(2.0, 4.0)
+
+    if await _engage_one_post(page, session, rng=rng, do_comment=True):
+        _log.info("Beat %d: like + comment done", beat_index)
+    else:
+        _log.warning("Beat %d: comment pass failed — continuing", beat_index)
+    await random_delay(2.5, 4.5)
+
+    if await _engage_one_post(page, session, rng=rng, do_comment=False):
+        _log.info("Beat %d: extra like done", beat_index)
+    await random_delay(1.8, 3.2)
+
+    if shares_remaining_today(session, min_daily_shares) > 0:
+        if await _share_one_to_own_timeline(
+            page,
+            session,
+            rng=rng,
+            min_daily_shares=min_daily_shares,
+        ):
+            _log.info("Beat %d: share done", beat_index)
+        else:
+            _log.warning("Beat %d: share skipped", beat_index)
+    await random_delay(2.0, 3.5)
 
 
 async def force_feed_comment(
@@ -429,106 +723,151 @@ async def run_structured_cycle(
     page: Page,
     session: AgentSession,
     *,
+    skip_friends: bool = True,
     max_friend_send: int = 4,
     max_friend_accept: int = 2,
     feed_rounds: int = 2,
+    feed_warmup_segments: int = 12,
     friend_scroll_rounds: int = 50,
     friend_stalk_min: int = 2,
     friend_stalk_max: int = 4,
+    min_daily_shares: int = 20,
 ) -> None:
     """
     One human-like session cycle (fixed order — not random LLM dice):
 
-    1. **Friend send** (suggestions, ≥3k friends/followers) + **friend accept** (requests page)
-    2. **Home feed** → scroll → like → (optional) comment — repeat ``feed_rounds`` times
+    When ``skip_friends`` is False:
+
+    1. **Friend send** (suggestions) + **friend accept** (requests page)
+    2. **Home feed** → scroll → like → comment → share — repeat ``feed_rounds`` times
+    3. **Own status post**
+
+    When ``skip_friends`` is True (default): feed engagement + status post only.
     """
     rng = random.Random()
 
     session.structured_cycles += 1
+    _reset_cycle_engagement(session)
     do_accept = session.structured_cycles % 2 == 0 or rng.random() < 0.35
 
-    _log.info("======== Phase 1/3: Friend suggestions (scroll → stalk → ≥%d) ========", DEFAULT_MIN_AUDIENCE)
-    try:
-        sent = await bot.send_friend_requests_from_suggestions(
-            page=page,
-            min_audience=DEFAULT_MIN_AUDIENCE,
-            max_send=max_friend_send,
-            scroll_rounds=friend_scroll_rounds,
-            stalk_min=friend_stalk_min,
-            stalk_max=friend_stalk_max,
-            return_to_feed_after=False,
-        )
-        if sent:
-            _log.info("Friend SEND: %d request(s)", sent)
-            session.recent_actions.append("send_friend_request")
-    except Exception as exc:
-        _log.warning("Friend send skipped: %s", exc)
-
-    await return_to_feed(page, log=_log)
-    await smooth_scroll(page, total_pixels=rng.randint(280, 480), duration_sec=rng.uniform(1.6, 2.6))
-    await random_delay(2.0, 4.0)
-
-    if do_accept:
-        _log.info("======== Friend accept (incoming only, not Sent tab) ========")
+    if skip_friends:
+        _log.info("======== Friends phase skipped (feed-only cycle) ========")
+        if not await ensure_newsfeed_with_posts(page):
+            _log.warning("Feed has no posts — skipping engagement this cycle")
+            return
+    else:
+        _log.info("======== Phase 1/3: Friend suggestions (scroll → stalk → ≥%d) ========", DEFAULT_MIN_AUDIENCE)
         try:
-            await page.goto(_FRIEND_REQUESTS, wait_until="domcontentloaded", timeout=60_000)
-            accepted = await bot.accept_pending_requests(
+            sent = await bot.send_friend_requests_from_suggestions(
                 page=page,
                 min_audience=DEFAULT_MIN_AUDIENCE,
-                max_accept=max_friend_accept,
+                max_send=max_friend_send,
+                scroll_rounds=friend_scroll_rounds,
+                stalk_min=friend_stalk_min,
+                stalk_max=friend_stalk_max,
+                return_to_feed_after=False,
             )
-            if accepted:
-                _log.info("Friend ACCEPT: %d request(s)", accepted)
-                session.recent_actions.append("accept_friend_request")
+            if sent:
+                _log.info("Friend SEND: %d request(s)", sent)
+                session.recent_actions.append("send_friend_request")
         except Exception as exc:
-            _log.warning("Friend accept skipped: %s", exc)
+            _log.warning("Friend send skipped: %s", exc)
+
         await return_to_feed(page, log=_log)
-        await random_delay(1.5, 2.5)
-    else:
-        _log.info("Skipping friend-accept this cycle (human-like — not every visit to Sent/Requests)")
+        await smooth_scroll(page, total_pixels=rng.randint(280, 480), duration_sec=rng.uniform(1.6, 2.6))
+        await random_delay(2.0, 4.0)
 
-    await random_delay(1.0, 2.0)
+        if do_accept:
+            _log.info("======== Friend accept (incoming only, not Sent tab) ========")
+            try:
+                await page.goto(_FRIEND_REQUESTS, wait_until="domcontentloaded", timeout=60_000)
+                accepted = await bot.accept_pending_requests(
+                    page=page,
+                    min_audience=DEFAULT_MIN_AUDIENCE,
+                    max_accept=max_friend_accept,
+                )
+                if accepted:
+                    _log.info("Friend ACCEPT: %d request(s)", accepted)
+                    session.recent_actions.append("accept_friend_request")
+            except Exception as exc:
+                _log.warning("Friend accept skipped: %s", exc)
+            await return_to_feed(page, log=_log)
+            await random_delay(1.5, 2.5)
+        else:
+            _log.info("Skipping friend-accept this cycle (human-like — not every visit to Sent/Requests)")
 
-    _log.info("======== Phase 2/3: Newsfeed scroll + like + comment ========")
+        await random_delay(1.0, 2.0)
+
+    feed_phase = "1/2" if skip_friends else "2/3"
+    post_phase = "2/2" if skip_friends else "3/3"
+    refresh_share_quota_day(session)
+    shares_left = shares_remaining_today(session, min_daily_shares)
+    _log.info(
+        "======== Phase %s: Newsfeed scroll + like + comment + share (today %d/%d, need %d more) ========",
+        feed_phase,
+        session.shares_today,
+        min_daily_shares,
+        shares_left,
+    )
     if not await ensure_newsfeed_with_posts(page):
         _log.warning("Feed has no posts — skipping engagement this cycle")
         return
 
+    if not session.feed_pre_warmed:
+        warmup_segs = min(max(feed_warmup_segments, 4), 8)
+        await browse_feed_warmup(
+            page,
+            rng=rng,
+            scroll_segments=warmup_segs,
+            label="before engage",
+        )
+        session.feed_pre_warmed = True
+    else:
+        await human_scroll(page, segments=rng.randint(2, 4))
+        await random_delay(1.5, 2.5)
+
     for r in range(feed_rounds):
-        _log.info("--- Feed round %d/%d ---", r + 1, feed_rounds)
-        await human_scroll(page, segments=rng.randint(2, 5))
-        session.recent_actions.append("scroll")
-        await random_delay(1.0, 2.0)
+        await _human_feed_beat(
+            page,
+            session,
+            rng=rng,
+            min_daily_shares=min_daily_shares,
+            beat_index=r + 1,
+            beat_total=feed_rounds,
+        )
 
-        if await _engage_one_post(page, session, rng=rng, do_comment=True):
-            await random_delay(1.0, 2.0)
-        else:
-            _log.warning("Feed round %d: comment pass failed", r + 1)
-
-        await human_scroll(page, segments=rng.randint(1, 2))
+    extra_share_attempts = 0
+    while (
+        shares_remaining_today(session, min_daily_shares) > 0
+        and extra_share_attempts < 4
+    ):
+        extra_share_attempts += 1
+        _log.info(
+            "Extra share attempt %d (still need %d today)",
+            extra_share_attempts,
+            shares_remaining_today(session, min_daily_shares),
+        )
+        await human_scroll(page, segments=rng.randint(3, 6))
         await random_delay(0.8, 1.5)
+        if not await _share_one_to_own_timeline(
+            page,
+            session,
+            rng=rng,
+            min_daily_shares=min_daily_shares,
+        ):
+            break
 
-        if await _engage_one_post(page, session, rng=rng, do_comment=False):
-            await random_delay(0.8, 1.5)
+    if shares_remaining_today(session, min_daily_shares) <= 0:
+        _log.info("Daily share goal reached (%d/%d)", session.shares_today, min_daily_shares)
 
-        if rng.random() < 0.35:
-            picked = await pick_random_visible_post(page, rng=rng)
-            if picked:
-                post, post_text = picked
-                share_target = rng.choice(["timeline", "group", "auto"])
-                if await share_post(
-                    page,
-                    post,
-                    target=share_target,  # type: ignore[arg-type]
-                    post_text=post_text,
-                ):
-                    session.recent_actions.append("share_post")
-                    _log.info("Feed: shared a post (%s)", share_target)
-
-    _log.info("======== Phase 3/3: Own status post ========")
-    await ensure_newsfeed_with_posts(page)
+    _log.info("======== Phase %s: Own status post ========", post_phase)
+    await recover_until_feed(page, log=_log, max_steps=2, reason="own status post")
     await click_feed_tab(page, log=_log)
-    await random_delay(1.0, 2.0)
+    try:
+        await page.evaluate("() => window.scrollTo(0, 0)")
+    except Exception:
+        pass
+    await random_delay(1.5, 2.5)
     status, style = await generate_status_post(avoid_styles=session.recent_post_styles[-6:])
     if await create_feed_post(page, status):
         session.posts_this_session += 1
@@ -540,10 +879,12 @@ async def run_structured_cycle(
 
     session.last_action = "scroll"
     _log.info(
-        "Cycle done — likes=%d comments=%d posts=%d",
+        "Cycle done — likes=%d comments=%d posts=%d shares_today=%d/%d",
         session.likes_this_session,
         session.comments_this_session,
         session.posts_this_session,
+        session.shares_today,
+        min_daily_shares,
     )
 
 

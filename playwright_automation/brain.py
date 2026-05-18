@@ -358,6 +358,74 @@ def decide_share_destination(
     return {"target": "timeline", "group_name": None}
 
 
+def generate_share_caption(
+    post_text: str,
+    *,
+    keywords: tuple[str, ...] = (),
+    model: str | None = None,
+    base_url: str | None = None,
+    timeout: float = 90.0,
+) -> str:
+    """
+    Short caption when re-sharing someone else's post to the logged-in user's timeline.
+
+    Returns plain caption text (same language as the post).
+    """
+    snippet = clean_post_text((post_text or "").strip(), max_chars=450)
+    if not snippet:
+        snippet = (post_text or "").strip()[:450]
+    lang = detect_post_language(snippet)
+    kw_hint = ""
+    if keywords:
+        kw_hint = "\nKey topics from the post: " + ", ".join(keywords[:6])
+    if lang == "bn":
+        system = (
+            "তুমি Facebook-এ অন্য কারো পোস্ট **নিজের প্রোফাইল/টাইমলাইনে** শেয়ার করছ। "
+            "ক্যাপশন **শুধু বাংলায়** — পোস্টে যে বিষয়/নাম/ঘটনা আছে সেটার সাথে সরাসরি "
+            "সম্পর্কিত ১ বাক্য (৫–২৮ শব্দ)। সাধারণ 'শেয়ার করলাম' ছাড়া পোস্টের বিষয় "
+            "উল্লেখ করো। হ্যাশট্যাগ নয়। JSON only."
+        )
+        user = (
+            "নিচের পোস্টের **বিষয় অনুযায়ী** টাইমলাইন শেয়ার ক্যাপশন লেখো "
+            "(পোস্টের মূল কথা বোঝা যাবে এমন)।\n\n"
+            'JSON only: {"caption": "<বাংলা ক্যাপশন>"}\n\n'
+            f"Post:\n{snippet}{kw_hint}"
+        )
+    else:
+        system = (
+            "You write a SHORT Facebook share caption when reposting someone else's post "
+            "to **your own timeline/profile**. English only. One sentence (5–22 words) "
+            "that clearly refers to THIS post's topic — mention a specific detail from "
+            "the post, not generic 'worth sharing'. No hashtags. JSON only."
+        )
+        user = (
+            "Write a share caption that matches what this post is actually about.\n\n"
+            'JSON only: {"caption": "<English caption>"}\n\n'
+            f"Post:\n{snippet}{kw_hint}"
+        )
+
+    raw = _chat(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        model=model,
+        base_url=base_url,
+        timeout=timeout,
+        format_json=True,
+    )
+    payload = _extract_json_object(raw)
+    caption = str(payload.get("caption", "")).strip()
+    if not caption:
+        raise BrainError(f"Model returned empty share caption. Payload: {payload!r}")
+    if not comment_matches_post_language(caption, snippet):
+        raise BrainError(f"Share caption language mismatch: {caption!r}")
+    if comment_is_too_generic(caption, snippet):
+        raise BrainError(f"Share caption too generic for post: {caption!r}")
+    if not comment_seems_relevant(caption, snippet):
+        raise BrainError(f"Share caption off-topic: {caption!r}")
+    if len(caption) > 300:
+        caption = caption[:297] + "..."
+    return caption
+
+
 def handle_chat(
     message_text: str,
     *,

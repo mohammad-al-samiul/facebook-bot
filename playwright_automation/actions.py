@@ -182,15 +182,82 @@ _SHARE_BUTTON_LABELS: tuple[str, ...] = (
     "Compartilhar",      # pt
 )
 
-_SHARE_NOW_LABELS: tuple[str, ...] = (
-    "Share now",
+# Step 2 of share flow (after Share icon): open profile repost composer.
+_SHARE_TO_PROFILE_LABELS: tuple[str, ...] = (
+    "Share to profile",
+    "Share to your profile",
+    "Share on your profile",
+    "Share to Profile",
+    "প্রোফাইলে শেয়ার",
+    "প্রোফাইলে শেয়ার",
+    "আপনার প্রোফাইলে শেয়ার",
+    "Bagikan ke profil",
+    "Partager sur le profil",
+    "Compartir en el perfil",
+    "Auf deinem Profil teilen",
+    "Condividi sul profilo",
+)
+
+_SHARE_COMPOSER_OPEN_LABELS: tuple[str, ...] = _SHARE_TO_PROFILE_LABELS + (
     "Share to News Feed",
     "Share to your timeline",
-    "Share to profile",
-    "Bagikan sekarang",
+    "Share to Facebook",
+    "Share on your timeline",
     "Bagikan ke Linimasa",
-    "শেয়ার করুন",
-    "শেয়ার করুন",
+    "Bagikan ke linimasa",
+    "ফিডে শেয়ার",
+    "ফিডে শেয়ার",
+    "নিউজ ফিডে শেয়ার",
+    "Partager sur votre fil",
+    "Compartir en tu biografía",
+    "Auf deiner Chronik teilen",
+    "Condividi sul tuo diario",
+    "Share to feed",
+)
+
+_CLICK_SHARE_TO_PROFILE_JS: Final[str] = """
+() => {
+  const keys = [
+    'share to profile', 'share to your profile', 'share on your profile',
+    'share to your timeline', 'share to news feed', 'share on your timeline',
+    'share to feed', 'share on facebook', 'share to facebook',
+    'প্রোফাইলে শেয়ার', 'প্রোফাইলে শেয়ার', 'ফিডে শেয়ার', 'ফিডে শেয়ার',
+    'নিউজ ফিডে', 'আপনার প্রোফাইলে', 'bagikan ke profil', 'bagikan ke linimasa',
+    'partager sur votre fil', 'compartir en tu biografía', 'auf deiner chronik',
+  ];
+  const nodes = document.querySelectorAll(
+    '[role="button"], [role="menuitem"], [role="link"], [tabindex="0"]'
+  );
+  for (const n of nodes) {
+    const label = ((n.getAttribute('aria-label') || n.innerText || '') + '')
+      .toLowerCase().trim();
+    if (!label || label.length > 80) continue;
+    if (keys.some((k) => label.includes(k))) {
+      n.click();
+      return label.slice(0, 60);
+    }
+  }
+  return false;
+}
+"""
+
+_SCROLL_SHARE_SHEET_JS: Final[str] = """
+() => {
+  const roots = document.querySelectorAll('[role="dialog"], [data-mcomponent*="Sheet"]');
+  for (const r of roots) {
+    if (r.scrollHeight > r.clientHeight + 40) {
+      r.scrollTop = Math.min(r.scrollTop + 220, r.scrollHeight);
+      return true;
+    }
+  }
+  window.scrollBy(0, 180);
+  return true;
+}
+"""
+
+_SHARE_INSTANT_ONLY_LABELS: tuple[str, ...] = (
+    "Share now",
+    "Bagikan sekarang",
     "Compartir ahora",
     "Partager maintenant",
     "Condividi ora",
@@ -198,9 +265,11 @@ _SHARE_NOW_LABELS: tuple[str, ...] = (
     "Nu delen",
     "今すぐシェア",
     "Compartilhar agora",
-    "Share to Facebook",
-    "ফিডে শেয়ার",
+    "শেয়ার করুন",
+    "শেয়ার করুন",
 )
+
+_SHARE_NOW_LABELS: tuple[str, ...] = _SHARE_COMPOSER_OPEN_LABELS + _SHARE_INSTANT_ONLY_LABELS
 
 _SHARE_TO_GROUP_LABELS: tuple[str, ...] = (
     "Share to a group",
@@ -224,6 +293,25 @@ _SHARE_FINAL_POST_LABELS: tuple[str, ...] = (
     "শেয়ার করুন",
     "Publish",
     "Done",
+)
+
+_SHARE_CAPTION_BOX_LABELS: tuple[str, ...] = (
+    "Say something about this",
+    "Say something about this...",
+    "Say something about this…",
+    "Share something",
+    "Share your thoughts",
+    "Write something",
+    "Write something...",
+    "Add to your post",
+    "এই সম্পর্কে কিছু বলুন",
+    "এই সম্পর্কে কিছু বলুন...",
+    "কিছু লিখুন",
+    "কিছু লিখুন...",
+    "শেয়ার করার সময় কিছু লিখুন",
+    "Tulis sesuatu",
+    "Schreib etwas",
+    "Écrivez quelque chose",
 )
 
 _COMMENT_SUBMIT_PRIORITY_LABELS: tuple[str, ...] = (
@@ -588,6 +676,367 @@ async def click_feed_tab(
 
 _FEED_HOME_URL: Final[str] = "https://www.facebook.com/"
 
+_STORY_CLOSE_LABELS: tuple[str, ...] = (
+    "Close story",
+    "Close Story",
+    "Close stories",
+    "স্টোরি বন্ধ করুন",
+    "স্টোরি বন্ধ",
+    "Tutup cerita",
+    "Cerrar historia",
+    "Fermer la story",
+    "Story schließen",
+)
+
+_CLOSE_STORY_JS: Final[str] = """
+() => {
+  const keys = [
+    'close story', 'close stories', 'স্টোরি বন্ধ', 'tutup cerita',
+    'cerrar historia', 'fermer la story', 'story schließen',
+  ];
+  const nodes = document.querySelectorAll(
+    '[role="button"][aria-label], [aria-label][role="button"]'
+  );
+  for (const n of nodes) {
+    const al = ((n.getAttribute('aria-label') || '') + '').toLowerCase().trim();
+    if (!keys.some((k) => al.includes(k))) continue;
+    const r = n.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) continue;
+    n.click();
+    return al || 'close';
+  }
+  return false;
+}
+"""
+
+_story_log = logging.getLogger("playwright_automation.actions.story")
+
+
+async def story_view_is_open(page: Page) -> bool:
+    """True when a full-screen Facebook Story overlay is visible."""
+    url = (page.url or "").lower()
+    if "/stories" in url or "story.php" in url:
+        return True
+    for lbl in _STORY_CLOSE_LABELS:
+        try:
+            loc = page.locator(f'[aria-label="{lbl}"][role="button"]').first
+            if await loc.is_visible(timeout=450):
+                return True
+        except Exception:
+            continue
+    try:
+        loc = page.locator('[aria-label*="Close story" i][role="button"]').first
+        return await loc.is_visible(timeout=450)
+    except Exception:
+        return False
+
+
+async def dismiss_story_view(page: Page, *, log: logging.Logger | None = None) -> bool:
+    """
+    Exit the Stories viewer via **Close story** (mobile ``aria-label`` / MContainer).
+
+    Returns True when a close control was clicked or Escape dismissed the overlay.
+    """
+    logger_ = log or _story_log
+    if not await story_view_is_open(page):
+        return False
+
+    logger_.info("Story viewer open — closing (url=%s)", (page.url or "")[:90])
+
+    for lbl in _STORY_CLOSE_LABELS:
+        btn = page.get_by_role("button", name=re.compile(rf"^\s*{re.escape(lbl)}\s*$", re.I)).first
+        try:
+            if await btn.is_visible(timeout=900):
+                await btn.click(timeout=4_000)
+                logger_.info("Closed story via button name=%r", lbl)
+                await random_delay(0.5, 1.0)
+                if not await story_view_is_open(page):
+                    return True
+        except Exception:
+            continue
+
+    for sel in (
+        '[aria-label="Close story"][role="button"]',
+        '[aria-label*="Close story" i][role="button"]',
+        '[data-mcomponent="MContainer"][aria-label*="Close story" i]',
+    ):
+        loc = page.locator(sel).first
+        try:
+            if await loc.is_visible(timeout=900):
+                await loc.click(timeout=4_000)
+                logger_.info("Closed story via selector %r", sel)
+                await random_delay(0.5, 1.0)
+                if not await story_view_is_open(page):
+                    return True
+        except Exception:
+            continue
+
+    try:
+        clicked = await page.evaluate(_CLOSE_STORY_JS)
+        if clicked:
+            logger_.info("Closed story via JS (%r)", clicked)
+            await random_delay(0.5, 1.0)
+            if not await story_view_is_open(page):
+                return True
+    except Exception as exc:
+        logger_.debug("Close story JS failed: %s", exc)
+
+    try:
+        await page.keyboard.press("Escape")
+        await random_delay(0.4, 0.8)
+        if not await story_view_is_open(page):
+            logger_.info("Closed story via Escape")
+            return True
+    except Exception:
+        pass
+
+    if await _toolbar_back_is_visible(page):
+        if await _click_toolbar_back_js(page):
+            logger_.info("Closed story via toolbar Back")
+            await random_delay(0.4, 0.8)
+            if not await story_view_is_open(page):
+                return True
+
+    logger_.warning("Story viewer may still be open after close attempts")
+    return False
+
+
+_RECOVER_LOG = logging.getLogger("playwright_automation.actions.recover")
+
+_FB_FEED_URLS: tuple[str, ...] = (
+    "https://m.facebook.com/",
+    "https://www.facebook.com/",
+)
+
+_FB_HOME_URL_RE: Final[re.Pattern[str]] = re.compile(
+    r"^https?://(www\.|m\.)?facebook\.com/?(\?[^#]*)?$",
+    re.I,
+)
+
+
+def _is_blank_or_broken_url(url: str | None) -> bool:
+    u = (url or "").strip().lower()
+    if not u or u == "about:blank":
+        return True
+    if u.startswith("chrome-error://") or u.startswith("chrome://"):
+        return True
+    return False
+
+
+def _is_facebook_feed_home(url: str | None) -> bool:
+    return bool(_FB_HOME_URL_RE.match((url or "").strip()))
+
+
+async def _can_safely_go_back(page: Page) -> bool:
+    """``go_back()`` on FB home often lands on ``about:blank`` — avoid that."""
+    url = page.url or ""
+    if _is_blank_or_broken_url(url):
+        return False
+    if _is_facebook_feed_home(url):
+        return False
+    try:
+        hist = await page.evaluate("() => window.history.length")
+        if hist is not None and int(hist) <= 1:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+async def _goto_facebook_feed(page: Page, *, log: logging.Logger | None = None) -> bool:
+    """Hard navigation to the news feed (fixes ``about:blank`` and lost history)."""
+    logger_ = log or _RECOVER_LOG
+    for feed_url in _FB_FEED_URLS:
+        try:
+            await page.goto(feed_url, wait_until="domcontentloaded", timeout=60_000)
+            await random_delay(1.0, 2.0)
+            cur = page.url or ""
+            if not _is_blank_or_broken_url(cur) and "facebook.com" in cur.lower():
+                logger_.info("Navigated to Facebook feed: %s", cur[:90])
+                try:
+                    await click_feed_tab(page, log=logger_)
+                except Exception:
+                    pass
+                return True
+        except Exception as exc:
+            logger_.debug("goto %s failed: %s", feed_url, exc)
+    return False
+
+
+# URLs / overlays where the feed Like buttons disappear — one step back usually fixes it.
+_STUCK_URL_FRAGMENTS: tuple[str, ...] = (
+    "/stories",
+    "/composer",
+    "/photo.php",
+    "/photos/",
+    "/watch",
+    "/marketplace",
+    "/gaming",
+    "/messages",
+    "/dialog",
+    "/share",
+    "/sharer",
+)
+
+
+async def page_looks_stuck(page: Page) -> bool:
+    """True when we are on a modal page or overlay instead of the scrollable feed."""
+    url = page.url or ""
+    if _is_blank_or_broken_url(url):
+        return True
+    low = url.lower()
+    if any(frag in low for frag in _STUCK_URL_FRAGMENTS):
+        return True
+    if await story_view_is_open(page):
+        return True
+    if await _toolbar_back_is_visible(page):
+        return True
+    try:
+        if await _comment_surface_is_open(page):
+            return True
+    except Exception:
+        pass
+    if "facebook.com" in low and "/friends" not in low:
+        from playwright_automation.post_engagement import has_feed_posts
+
+        if not await has_feed_posts(page):
+            return True
+    return False
+
+
+async def recover_one_step_back(
+    page: Page,
+    *,
+    log: logging.Logger | None = None,
+    reason: str = "",
+) -> bool:
+    """
+    Unstick the session with **one** back gesture: UI Back, Close, Escape, or
+    ``page.go_back()``. Safe to call repeatedly when an action fails.
+    """
+    logger_ = log or _RECOVER_LOG
+    before = page.url or ""
+    tag = f" ({reason})" if reason else ""
+    logger_.info("Recover one step back%s — was %s", tag, before[:90])
+
+    if _is_blank_or_broken_url(before):
+        logger_.warning("Page is about:blank — navigating to Facebook feed")
+        return await _goto_facebook_feed(page, log=logger_)
+
+    if await dismiss_story_view(page, log=logger_):
+        await random_delay(0.45, 0.9)
+        if (page.url or "") != before:
+            return True
+
+    try:
+        if await _comment_surface_is_open(page):
+            if await dismiss_mobile_comment_surface_after_post(page, log=logger_):
+                await random_delay(0.4, 0.85)
+                if (page.url or "") != before:
+                    return True
+    except Exception:
+        pass
+
+    if await _toolbar_back_is_visible(page):
+        if await _click_toolbar_back_js(page):
+            logger_.info("Recovered via toolbar Back (JS)")
+            await random_delay(0.45, 0.9)
+            if (page.url or "") != before:
+                return True
+        for lbl in _BACK_AFTER_COMMENT_ARIA:
+            loc = page.locator(f'[role="button"][aria-label="{lbl}"]').first
+            try:
+                if await loc.is_visible(timeout=700):
+                    await loc.click(timeout=3_500)
+                    logger_.info("Recovered via Back aria-label=%r", lbl)
+                    await random_delay(0.45, 0.9)
+                    if (page.url or "") != before:
+                        return True
+            except Exception:
+                continue
+
+    for pat in (
+        re.compile(r"^\s*close\s*$", re.I),
+        re.compile(r"^\s*cancel\s*$", re.I),
+        re.compile(r"^\s*back\s*$", re.I),
+        re.compile(r"^\s*বাতিল\s*$", re.I),
+        re.compile(r"^\s*পিছনে\s*$", re.I),
+    ):
+        btn = page.get_by_role("button", name=pat).first
+        try:
+            if await btn.is_visible(timeout=500):
+                await btn.click(timeout=3_500)
+                logger_.info("Recovered via button %r", pat.pattern)
+                await random_delay(0.4, 0.85)
+                if (page.url or "") != before:
+                    return True
+        except Exception:
+            continue
+
+    try:
+        await page.keyboard.press("Escape")
+        await random_delay(0.35, 0.7)
+        if (page.url or "") != before:
+            logger_.info("Recovered via Escape")
+            return True
+    except Exception:
+        pass
+
+    if await _can_safely_go_back(page):
+        try:
+            await page.go_back(wait_until="domcontentloaded", timeout=14_000)
+            after = page.url or ""
+            await random_delay(0.5, 1.0)
+            if _is_blank_or_broken_url(after):
+                logger_.warning("go_back landed on about:blank — loading feed instead")
+                return await _goto_facebook_feed(page, log=logger_)
+            if after != before and "facebook.com" in after.lower():
+                logger_.info("Recovered via browser go_back → %s", after[:90])
+                return True
+        except Exception as exc:
+            logger_.debug("browser go_back failed: %s", exc)
+    else:
+        logger_.info("Skipping go_back on FB home / empty history — using feed navigation")
+
+    after = page.url or ""
+    if _is_blank_or_broken_url(after) or "facebook.com" not in after.lower():
+        logger_.info("Off Facebook (%s) — loading feed", after[:60])
+        return await _goto_facebook_feed(page, log=logger_)
+
+    return after != before and not _is_blank_or_broken_url(after)
+
+
+async def recover_until_feed(
+    page: Page,
+    *,
+    log: logging.Logger | None = None,
+    max_steps: int = 3,
+    reason: str = "",
+) -> bool:
+    """Try up to ``max_steps`` back gestures, then home feed if still stuck."""
+    logger_ = log or _RECOVER_LOG
+    from playwright_automation.post_engagement import has_feed_posts
+
+    if _is_blank_or_broken_url(page.url):
+        return await _goto_facebook_feed(page, log=logger_)
+
+    for step in range(1, max_steps + 1):
+        if await has_feed_posts(page) and not await page_looks_stuck(page):
+            return True
+        await recover_one_step_back(
+            page,
+            log=logger_,
+            reason=reason or f"step {step}/{max_steps}",
+        )
+        await random_delay(0.5, 1.0)
+        if await has_feed_posts(page) and not await page_looks_stuck(page):
+            return True
+
+    if await page_looks_stuck(page) or not await has_feed_posts(page):
+        await return_to_feed(page, log=logger_)
+        await random_delay(0.6, 1.2)
+    return await has_feed_posts(page)
+
 
 async def return_to_feed(page: Page, *, log: logging.Logger | None = None) -> None:
     """
@@ -597,7 +1046,17 @@ async def return_to_feed(page: Page, *, log: logging.Logger | None = None) -> No
     on the home timeline (that would jump scroll back to the top).
     """
     logger_ = log or logging.getLogger("playwright_automation.actions.feed_return")
+    if await dismiss_story_view(page, log=logger_):
+        return
+
     url = (page.url or "").lower()
+    if await page_looks_stuck(page):
+        if await recover_one_step_back(page, log=logger_, reason="return_to_feed"):
+            from playwright_automation.post_engagement import has_feed_posts
+
+            if await has_feed_posts(page):
+                return
+
     off_feed = any(
         frag in url
         for frag in (
@@ -606,6 +1065,8 @@ async def return_to_feed(page: Page, *, log: logging.Logger | None = None) -> No
             "/notifications",
             "/profile.php",
             "/me/",
+            "/stories",
+            "/composer",
         )
     )
     if not off_feed:
@@ -986,7 +1447,7 @@ def _default_comment_trigger(post_element: Locator) -> Locator:
 
 _CLICK_COMMENT_JS: Final[str] = """
 (el) => {
-  const root = el.closest('[role="article"]') || el;
+  const root = el.closest('[role="article"]') || el.closest('[data-pe-post]') || el;
   const nodes = root.querySelectorAll(
     '[role="button"], [role="link"], a[role="link"], span[tabindex="0"]'
   );
@@ -1000,6 +1461,116 @@ _CLICK_COMMENT_JS: Final[str] = """
       n.click();
       return true;
     }
+  }
+  return false;
+}
+"""
+
+_CLICK_SHARE_JS: Final[str] = """
+(el) => {
+  const root = el.closest('[role="article"]') || el.closest('[data-pe-post]') || el;
+  const nodes = root.querySelectorAll(
+    '[role="button"], [role="link"], a[role="link"], span[tabindex="0"]'
+  );
+  const shareKeys = [
+    'share', 'শেয়ার', 'শেয়ার', 'bagikan', 'teilen', 'partager', 'compartir',
+    'condividi', 'udostępnij', 'แชร์', 'シェア', 'compartilhar', 'delen',
+  ];
+  const moreKeys = ['more', 'আরও', 'more options', 'see more', 'meer', 'plus'];
+  const badHref = (n) => {
+    const href = ((n.getAttribute && n.getAttribute('href')) || n.href || '').toLowerCase();
+    return href.includes('story.php') || href.includes('/reel/') || href.includes('/reels/');
+  };
+  const pick = (keys) => {
+    for (const n of nodes) {
+      if (n.tagName === 'A' && badHref(n)) continue;
+      const label = ((n.getAttribute('aria-label') || n.innerText || '') + '').toLowerCase();
+      if (!keys.some((k) => label.includes(k))) continue;
+      if (n.getAttribute('role') === 'button' || n.tagName === 'BUTTON') {
+        n.click();
+        return true;
+      }
+    }
+    for (const n of nodes) {
+      if (n.tagName === 'A' && badHref(n)) continue;
+      const label = ((n.getAttribute('aria-label') || n.innerText || '') + '').toLowerCase();
+      if (keys.some((k) => label.includes(k))) {
+        n.click();
+        return true;
+      }
+    }
+    return false;
+  };
+  if (pick(shareKeys)) return 'share';
+  if (pick(moreKeys)) return 'more';
+  return false;
+}
+"""
+
+_OPEN_SHARE_WRITE_SOMETHING_JS: Final[str] = """
+() => {
+  const skipRe = /what'?s on your mind|create a post|আপনার মনে কী|create post/i;
+  const wantRe = /write something|say something|share something|share your thoughts|এই সম্পর্কে|কিছু লিখুন|tulis sesuatu|schreib|écrivez|add to your post/i;
+
+  // Mobile share sheet: clickable placeholder (not contenteditable until tapped).
+  const serverAreas = document.querySelectorAll('[data-mcomponent="ServerTextArea"]');
+  for (const el of serverAreas) {
+    const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+    if (skipRe.test(t)) continue;
+    if (t.length > 0 && !wantRe.test(t)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 16 || r.top < 0) continue;
+    el.click();
+    return 'ServerTextArea';
+  }
+
+  const nodes = document.querySelectorAll('[role="button"], [role="textbox"]');
+  for (const n of nodes) {
+    const t = (n.innerText || n.getAttribute('aria-label') || '').trim();
+    if (skipRe.test(t)) continue;
+    if (!wantRe.test(t)) continue;
+    const r = n.getBoundingClientRect();
+    if (r.width < 40 || r.height < 16 || r.top < 0) continue;
+    n.click();
+    return 'button';
+  }
+
+  const boxes = document.querySelectorAll(
+    '[contenteditable="true"][role="textbox"], [contenteditable="true"], textarea'
+  );
+  for (const el of boxes) {
+    const label = (
+      (el.getAttribute('aria-label') || el.getAttribute('placeholder') || '') + ''
+    ).trim();
+    if (skipRe.test(label)) continue;
+    if (label.length > 0 && !wantRe.test(label)) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 40 || r.height < 16 || r.top < 0) continue;
+    el.focus();
+    el.click();
+    return 'contenteditable';
+  }
+  return false;
+}
+"""
+
+_FOCUS_SHARE_CAPTION_JS: Final[str] = _OPEN_SHARE_WRITE_SOMETHING_JS
+
+_CLICK_TOOLBAR_BACK_JS: Final[str] = """
+() => {
+  const keys = [
+    'back', 'পিছনে', 'kembali', 'zurück', 'atrás', 'retour', 'indietro', 'volver',
+    'terug', 'назад', '戻る', 'voltar', 'wstecz', 'tilbage',
+  ];
+  const nodes = document.querySelectorAll('[role="button"], [role="link"]');
+  for (const n of nodes) {
+    const label = ((n.getAttribute('aria-label') || n.innerText || '') + '').toLowerCase().trim();
+    if (!keys.some((k) => label === k || label.startsWith(k + ' '))) continue;
+    const r = n.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) continue;
+    if (r.top > 180) continue;
+    n.click();
+    return true;
   }
   return false;
 }
@@ -1179,11 +1750,39 @@ _CLOSE_AFTER_COMMENT_ARIA: tuple[str, ...] = (
 )
 
 
+async def _toolbar_back_is_visible(page: Page) -> bool:
+    """True when a top-toolbar Back control is visible (full-screen comment / share UI)."""
+    for lbl in _BACK_AFTER_COMMENT_ARIA:
+        loc = page.locator(f'[role="button"][aria-label="{lbl}"]').first
+        try:
+            if await loc.is_visible(timeout=280):
+                return True
+        except Exception:
+            continue
+    try:
+        role_loc = page.get_by_role("button", name=re.compile(r"^\s*back\s*$", re.I)).first
+        if await role_loc.is_visible(timeout=280):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def _click_toolbar_back_js(page: Page) -> bool:
+    try:
+        return bool(await page.evaluate(_CLICK_TOOLBAR_BACK_JS))
+    except Exception:
+        return False
+
+
 async def _comment_surface_is_open(page: Page) -> bool:
-    """True when a comment composer / full-screen comment layer is still visible."""
+    """True only for full-screen comment UI (toolbar Back visible), not inline feed boxes."""
+    if not await _toolbar_back_is_visible(page):
+        return False
     selectors = (
         '[aria-label*="Write a comment" i][contenteditable="true"]',
-        '[aria-label*="comment" i][contenteditable="true"]',
+        '[aria-label*="Write a public comment" i][contenteditable="true"]',
+        '[aria-label*="Tulis komentar" i][contenteditable="true"]',
         '[aria-label*="কমেন্ট" i][contenteditable="true"]',
         '[aria-label*="মন্তব্য" i][contenteditable="true"]',
         'div[aria-label*="comment" i][role="textbox"]',
@@ -1196,13 +1795,7 @@ async def _comment_surface_is_open(page: Page) -> bool:
                 return True
         except Exception:
             continue
-    try:
-        editable = page.locator('[contenteditable="true"][role="textbox"]').last
-        if await editable.is_visible(timeout=350):
-            return True
-    except Exception:
-        pass
-    return False
+    return True
 
 
 async def dismiss_mobile_comment_surface_after_post(
@@ -1264,6 +1857,11 @@ async def dismiss_mobile_comment_surface_after_post(
         except Exception:
             continue
 
+    if await _click_toolbar_back_js(page):
+        logger_.info("Closed comment composer via JS toolbar Back")
+        await random_delay(0.45, 0.95)
+        return True
+
     return False
 
 
@@ -1295,12 +1893,24 @@ async def force_exit_comment_composer(
         except Exception:
             pass
 
-        if round_i >= 2:
+        if round_i >= 1:
             try:
-                await page.go_back(wait_until="domcontentloaded", timeout=12_000)
-                await random_delay(0.6, 1.2)
-            except Exception as exc:
-                logger_.debug("go_back from comment UI failed: %s", exc)
+                await click_feed_tab(page, log=logger_)
+                await random_delay(0.5, 1.0)
+            except Exception:
+                pass
+
+        if round_i >= 2:
+            if await _can_safely_go_back(page):
+                try:
+                    await page.go_back(wait_until="domcontentloaded", timeout=12_000)
+                    await random_delay(0.6, 1.2)
+                    if _is_blank_or_broken_url(page.url):
+                        await _goto_facebook_feed(page, log=logger_)
+                except Exception as exc:
+                    logger_.debug("go_back from comment UI failed: %s", exc)
+            else:
+                await _goto_facebook_feed(page, log=logger_)
 
         if round_i >= 3 and await _comment_surface_is_open(page):
             await return_to_feed(page, log=logger_)
@@ -1324,6 +1934,7 @@ async def resume_feed_after_comment(
 ) -> None:
     """Exit comment UI if needed, then scroll the feed like a human continuing to browse."""
     logger_ = log or _comment_log
+    await recover_one_step_back(page, log=logger_, reason="after comment")
     await force_exit_comment_composer(page, log=logger_)
     await random_delay(0.5, 1.1)
 
@@ -1341,13 +1952,24 @@ async def resume_feed_after_comment(
 
 
 async def _return_after_successful_comment_submit(page: Page) -> bool:
-    """Brief pause after submit; exit + feed scroll happen in ``comment_on_post`` finally."""
+    """Leave the comment layer right after submit; feed scroll runs in ``finally``."""
+    await random_delay(0.45, 0.95)
+    closed = await dismiss_mobile_comment_surface_after_post(page, log=_comment_log)
+    if not closed and await _comment_surface_is_open(page):
+        closed = await _click_toolbar_back_js(page)
+        if closed:
+            _comment_log.info("Closed comment composer via JS Back after submit")
+        await random_delay(0.35, 0.75)
+    if await _comment_surface_is_open(page):
+        await force_exit_comment_composer(page, log=_comment_log, max_rounds=3)
+    settle = min(_COMMENT_SETTLE_MIN_SEC, 2.5)
+    settle_max = min(_COMMENT_SETTLE_MAX_SEC, 3.5)
     _comment_log.info(
-        "Comment submitted — pausing %.1f–%.1fs before leaving composer",
-        _COMMENT_SETTLE_MIN_SEC,
-        _COMMENT_SETTLE_MAX_SEC,
+        "Comment submitted — brief pause %.1f–%.1fs on feed",
+        settle,
+        settle_max,
     )
-    await random_delay(_COMMENT_SETTLE_MIN_SEC, _COMMENT_SETTLE_MAX_SEC)
+    await random_delay(settle, settle_max)
     return True
 
 
@@ -1431,120 +2053,466 @@ _STATUS_POST_SUBMIT_LABELS: tuple[str, ...] = (
     "পোস্ট",
     "পোস্ট করুন",
     "Publish",
-    "Share",
     "Kirim",
     "Publicar",
     "Publier",
     "Pubblica",
 )
 
+_STATUS_LOG = logging.getLogger("playwright_automation.actions.status_post")
 
-async def create_feed_post(page: Page, text: str) -> bool:
-    """
-    Open the home-feed composer, type ``text``, and tap **Post**.
+_FB_POST_ERROR_RE: Final[str] = (
+    r"something went wrong|কিছু ভুল|an error occurred|couldn't post|could not post|"
+    r"please try again|আবার চেষ্টা"
+)
 
-    Returns ``True`` when the composer was filled and a submit control was clicked.
-    """
-    body = (text or "").strip()
-    if not body:
+_FB_ERROR_MODAL_JS: Final[str] = f"""
+() => {{
+  const errRe = /{_FB_POST_ERROR_RE}/i;
+  const roots = document.querySelectorAll(
+    '[role="dialog"], [role="alertdialog"], [role="alert"], [data-mcomponent*="Dialog"]'
+  );
+  for (const root of roots) {{
+    const t = (root.innerText || '').trim();
+    if (t.length > 0 && t.length < 800 && errRe.test(t)) return true;
+  }}
+  return false;
+}}
+"""
+
+_DISMISS_FB_ERROR_JS: Final[str] = f"""
+() => {{
+  const errRe = /{_FB_POST_ERROR_RE}/i;
+  const roots = document.querySelectorAll(
+    '[role="dialog"], [role="alertdialog"], [role="alert"], [data-mcomponent*="Dialog"]'
+  );
+  let target = null;
+  for (const root of roots) {{
+    const t = (root.innerText || '').trim();
+    if (t.length > 0 && t.length < 800 && errRe.test(t)) {{
+      target = root;
+      break;
+    }}
+  }}
+  if (!target) return false;
+  const okKeys = ['ok', 'close', 'try again', 'ঠিক', 'বন্ধ', 'retry', 'cancel'];
+  const nodes = target.querySelectorAll('[role="button"], [role="menuitem"]');
+  for (const n of nodes) {{
+    const t = ((n.getAttribute('aria-label') || n.innerText || '') + '').toLowerCase().trim();
+    if (okKeys.some((k) => t === k || t.startsWith(k + ' '))) {{
+      n.click();
+      return t;
+    }}
+  }}
+  return false;
+}}
+"""
+
+_STATUS_PUBLISH_OK_JS: Final[str] = f"""
+() => {{
+  const errRe = /{_FB_POST_ERROR_RE}/i;
+  const dialogs = document.querySelectorAll(
+    '[role="dialog"], [role="alertdialog"], [role="alert"]'
+  );
+  for (const d of dialogs) {{
+    const t = (d.innerText || '').trim();
+    if (t.length > 0 && t.length < 800 && errRe.test(t)) return {{ ok: false, reason: 'error_modal' }};
+  }}
+  const areas = document.querySelectorAll('[contenteditable="true"]');
+  let draftLen = 0;
+  for (const n of areas) {{
+    const t = (n.innerText || '').trim();
+    if (t.length > 12 && !/what'?s on your mind|create a post|আপনার মনে/i.test(t)) {{
+      draftLen = Math.max(draftLen, t.length);
+    }}
+  }}
+  const onComposer = /composer/i.test(location.pathname || '');
+  if (draftLen > 20 && onComposer) return {{ ok: false, reason: 'composer_draft' }};
+  return {{ ok: true, reason: 'ok' }};
+}}
+"""
+
+_SET_STATUS_TEXT_JS: Final[str] = """
+(el, text) => {
+  if (!el) return false;
+  el.focus();
+  try {
+    el.textContent = text;
+  } catch (e) {
+    el.innerText = text;
+  }
+  el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  const out = (el.innerText || el.textContent || '').trim();
+  return out.length >= Math.min(8, text.length / 3);
+}
+"""
+
+_OPEN_STATUS_COMPOSER_JS: Final[str] = """
+() => {
+  const openKeys = [
+    "what's on your mind", 'create a post', 'আপনার মনে কী', 'পোস্ট তৈরি', 'কিছু লিখুন',
+  ];
+  const areas = document.querySelectorAll('[data-mcomponent="ServerTextArea"], [role="button"]');
+  for (const el of areas) {
+    const t = (el.innerText || el.getAttribute('aria-label') || '').toLowerCase();
+    if (openKeys.some((k) => t.includes(k))) {
+      el.click();
+      return t.slice(0, 40);
+    }
+  }
+  return false;
+}
+"""
+
+
+async def _fb_error_visible(page: Page) -> bool:
+    """True only when an error appears inside a dialog/alert — not random feed text."""
+    try:
+        return bool(await page.evaluate(_FB_ERROR_MODAL_JS))
+    except Exception:
         return False
 
-    _comment_log.info("Creating feed post (%d chars)", len(body))
-    await random_delay(0.5, 1.0)
 
-    opened = False
+async def _click_try_again_on_error(page: Page) -> bool:
+    for pat in (
+        re.compile(r"try again", re.I),
+        re.compile(r"আবার চেষ্টা", re.I),
+        re.compile(r"retry", re.I),
+    ):
+        btn = page.get_by_role("button", name=pat).first
+        try:
+            if await btn.is_visible(timeout=900):
+                await btn.click(timeout=3_000)
+                _STATUS_LOG.info("Tapped Try again on FB error")
+                await random_delay(0.8, 1.4)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _dismiss_fb_error_dialog(page: Page) -> bool:
+    if not await _fb_error_visible(page):
+        return False
+    for pat in (
+        re.compile(r"^\s*ok\s*$", re.I),
+        re.compile(r"^\s*close\s*$", re.I),
+        re.compile(r"^\s*try again\s*$", re.I),
+        re.compile(r"^\s*ঠিক\s*$", re.I),
+    ):
+        btn = page.get_by_role("button", name=pat).first
+        try:
+            if await btn.is_visible(timeout=800):
+                await btn.click(timeout=3_000)
+                _STATUS_LOG.info("Dismissed FB error via %r", pat.pattern)
+                await random_delay(0.5, 1.0)
+                return True
+        except Exception:
+            continue
+    try:
+        if await page.evaluate(_DISMISS_FB_ERROR_JS):
+            _STATUS_LOG.info("Dismissed FB error via JS")
+            await random_delay(0.5, 1.0)
+            return True
+    except Exception:
+        pass
+    try:
+        await page.keyboard.press("Escape")
+        await random_delay(0.4, 0.8)
+    except Exception:
+        pass
+    return not await _fb_error_visible(page)
+
+
+async def _prepare_own_post_composer(page: Page) -> bool:
+    """Home feed + top of page — avoids posting from profile/bookmarks by mistake."""
+    await recover_one_step_back(page, log=_STATUS_LOG, reason="before status post")
+    if _is_blank_or_broken_url(page.url) or "facebook.com" not in (page.url or "").lower():
+        await _goto_facebook_feed(page, log=_STATUS_LOG)
+    url = (page.url or "").lower()
+    if any(x in url for x in ("/profile", "/bookmarks", "/notifications", "/friends", "/composer")):
+        await _goto_facebook_feed(page, log=_STATUS_LOG)
+    try:
+        await click_feed_tab(page, log=_STATUS_LOG)
+    except Exception:
+        pass
+    try:
+        await page.evaluate("() => { window.scrollTo(0, 0); }")
+    except Exception:
+        pass
+    await random_delay(1.0, 2.0)
+    await _dismiss_fb_error_dialog(page)
+    return True
+
+
+async def _open_status_composer(page: Page, *, prefer_url: bool = False) -> bool:
+    if prefer_url:
+        try:
+            await page.goto(
+                "https://m.facebook.com/composer/?ref=m_upload_pic",
+                wait_until="domcontentloaded",
+                timeout=45_000,
+            )
+            await random_delay(1.2, 2.0)
+            if "composer" in (page.url or "").lower():
+                _STATUS_LOG.info("Opened composer via m.facebook.com/composer URL")
+                return True
+        except Exception as exc:
+            _STATUS_LOG.debug("composer URL failed: %s", exc)
+
     for lbl in _COMPOSER_OPEN_LABELS:
         btn = page.get_by_role("button", name=re.compile(re.escape(lbl), re.I)).first
         try:
             if await btn.is_visible(timeout=900):
                 await asyncio.wait_for(human_click(page, btn), timeout=6.0)
-                opened = True
-                break
+                _STATUS_LOG.info("Opened status composer via %r", lbl)
+                return True
         except Exception:
             continue
-    if not opened:
+    for loc in (
+        page.locator('[data-mcomponent="ServerTextArea"]').filter(
+            has_text=re.compile(r"mind|কিছু|পোস্ট", re.I)
+        ).first,
+        page.locator('[aria-label*="mind" i][role="button"]').first,
+        page.locator('[role="button"]').filter(
+            has_text=re.compile(r"what'?s on your mind|আপনার মনে", re.I)
+        ).first,
+    ):
         try:
-            btn = page.locator('[aria-label*="mind" i][role="button"]').first
-            if await btn.is_visible(timeout=1200):
-                await asyncio.wait_for(human_click(page, btn), timeout=6.0)
-                opened = True
+            if await loc.is_visible(timeout=1_200):
+                await loc.click(timeout=4_000)
+                _STATUS_LOG.info("Opened status composer via mobile placeholder")
+                return True
         except Exception:
-            pass
-    if not opened:
-        _comment_log.warning("Feed composer open button not found")
-        return False
+            continue
+    try:
+        opened = await page.evaluate(_OPEN_STATUS_COMPOSER_JS)
+        if opened:
+            _STATUS_LOG.info("Opened status composer via JS (%r)", opened)
+            return True
+    except Exception:
+        pass
+    try:
+        await page.goto(
+            "https://m.facebook.com/composer/?ref=m_upload_pic",
+            wait_until="domcontentloaded",
+            timeout=45_000,
+        )
+        await random_delay(1.2, 2.0)
+        if "composer" in (page.url or "").lower():
+            _STATUS_LOG.info("Opened composer via m.facebook.com/composer URL")
+            return True
+    except Exception as exc:
+        _STATUS_LOG.debug("composer URL failed: %s", exc)
+    return False
 
-    await random_delay(0.8, 1.5)
 
-    box: Locator | None = None
+async def _locate_status_text_box(page: Page) -> Locator | None:
     for lbl in _COMPOSER_BOX_LABELS:
         for cand in (
             page.locator(f'[aria-label="{lbl}"][contenteditable="true"]'),
             page.locator(f'[aria-label*="{lbl}" i][contenteditable="true"]'),
             page.locator(f'div[aria-label="{lbl}"][role="textbox"]'),
-            page.locator(f'div[aria-label*="{lbl}" i][role="textbox"]'),
         ):
             try:
-                if await cand.first.is_visible(timeout=800):
-                    box = cand.first
-                    break
+                if await cand.first.is_visible(timeout=700):
+                    return cand.first
             except Exception:
                 continue
-        if box is not None:
-            break
-
-    if box is None:
-        for cand in (
-            page.locator('[contenteditable="true"][role="textbox"]').last,
-            page.locator('[contenteditable="true"]').last,
-            page.locator('textarea[placeholder*="mind" i]').first,
-        ):
-            try:
-                if await cand.is_visible(timeout=1500):
-                    box = cand
-                    break
-            except Exception:
-                continue
-
-    if box is None:
-        _comment_log.warning("Feed composer text box not found")
-        return False
-
-    try:
-        await asyncio.wait_for(human_click(page, box), timeout=6.0)
-    except Exception:
+    for cand in (
+        page.locator('[contenteditable="true"][role="textbox"]').first,
+        page.locator('[data-mcomponent="ServerTextArea"] [contenteditable="true"]').first,
+        page.locator('[contenteditable="true"]').first,
+    ):
         try:
-            await box.click(timeout=3_000)
-        except Exception:
-            return False
-    await random_delay(0.3, 0.7)
-
-    for ch in body[:2000]:
-        await page.keyboard.type(ch)
-        await asyncio.sleep(random.uniform(0.04, 0.14))
-
-    await random_delay(0.6, 1.2)
-
-    for lbl in _STATUS_POST_SUBMIT_LABELS:
-        submit = page.get_by_role("button", name=re.compile(rf"^\s*{re.escape(lbl)}\s*$", re.I)).first
-        try:
-            if await submit.is_visible(timeout=1200):
-                await asyncio.wait_for(human_click(page, submit), timeout=6.0)
-                await random_delay(1.5, 3.0)
-                _comment_log.info("Feed post submitted via %r", lbl)
-                return True
+            if await cand.is_visible(timeout=1_200):
+                al = (await cand.get_attribute("aria-label")) or ""
+                if re.search(r"say something|write something|share", al, re.I):
+                    continue
+                return cand
         except Exception:
             continue
+    return None
 
+
+async def _type_status_post(page: Page, box: Locator | None, body: str) -> bool:
+    text = body[:120].strip()
+    if not text:
+        return False
+    if box is not None:
+        try:
+            await asyncio.wait_for(human_click(page, box), timeout=6.0)
+        except Exception:
+            try:
+                await box.click(timeout=3_000)
+            except Exception:
+                box = None
+    await random_delay(0.35, 0.7)
+    if box is not None:
+        try:
+            handle = await box.element_handle(timeout=2_000)
+            if handle is not None:
+                ok = bool(await handle.evaluate(_SET_STATUS_TEXT_JS, text))
+                if ok:
+                    await random_delay(0.4, 0.8)
+                    return True
+        except Exception as exc:
+            _STATUS_LOG.debug("JS status type failed: %s", exc)
+        try:
+            await box.fill(text)
+            await random_delay(0.4, 0.8)
+            return True
+        except Exception:
+            pass
+    for ch in text:
+        await page.keyboard.type(ch)
+        await asyncio.sleep(random.uniform(0.03, 0.08))
+    await random_delay(0.5, 1.0)
+    try:
+        sample = await page.evaluate(
+            """() => {
+              const nodes = document.querySelectorAll('[contenteditable="true"]');
+              for (const n of nodes) {
+                const t = (n.innerText || '').trim();
+                if (t.length > 8 && !/what'?s on your mind/i.test(t)) return t.slice(0, 60);
+              }
+              return '';
+            }""",
+        )
+        return bool(sample and len(str(sample)) >= min(8, len(text) // 3))
+    except Exception:
+        return True
+
+
+async def _submit_status_post(page: Page) -> bool:
+    scopes: list = [page.locator('[role="dialog"]'), page]
+    for scope in scopes:
+        for lbl in _STATUS_POST_SUBMIT_LABELS:
+            submit = scope.get_by_role(
+                "button", name=re.compile(rf"^\s*{re.escape(lbl)}\s*$", re.I)
+            ).first
+            try:
+                if await submit.is_visible(timeout=1_500):
+                    try:
+                        disabled = await submit.get_attribute("aria-disabled")
+                        if disabled and disabled.lower() == "true":
+                            await random_delay(0.6, 1.0)
+                    except Exception:
+                        pass
+                    await asyncio.wait_for(human_click(page, submit), timeout=6.0)
+                    _STATUS_LOG.info("Tapped status Post via %r", lbl)
+                    return True
+            except Exception:
+                continue
+        for sel in (
+            '[aria-label="Post"][role="button"]',
+            '[aria-label="পোস্ট"][role="button"]',
+        ):
+            loc = scope.locator(sel).first
+            try:
+                if await loc.is_visible(timeout=1_000):
+                    await loc.click(timeout=4_000)
+                    _STATUS_LOG.info("Tapped status Post via %r", sel)
+                    return True
+            except Exception:
+                continue
     try:
         await page.keyboard.press("Control+Enter")
-        await random_delay(1.0, 2.0)
-        _comment_log.info("Feed post submitted via Ctrl+Enter")
         return True
     except Exception:
-        pass
+        return False
 
-    _comment_log.warning("Feed post submit button not found")
+
+async def _status_post_publish_ok(page: Page) -> bool:
+    await random_delay(2.5, 4.0)
+    try:
+        state = await page.evaluate(_STATUS_PUBLISH_OK_JS)
+        if isinstance(state, dict) and state.get("ok"):
+            return True
+        reason = state.get("reason") if isinstance(state, dict) else "unknown"
+        if reason == "error_modal":
+            _STATUS_LOG.warning("Facebook error modal after Post tap")
+            if await _click_try_again_on_error(page):
+                return False
+        elif reason == "composer_draft":
+            _STATUS_LOG.debug("Composer still has draft text after Post")
+    except Exception as exc:
+        _STATUS_LOG.debug("publish check failed: %s", exc)
+    if await _fb_error_visible(page):
+        await _dismiss_fb_error_dialog(page)
+        return False
+    await _dismiss_fb_error_dialog(page)
+    try:
+        state = await page.evaluate(_STATUS_PUBLISH_OK_JS)
+        return bool(isinstance(state, dict) and state.get("ok"))
+    except Exception:
+        return not await _fb_error_visible(page)
+
+
+async def create_feed_post(page: Page, text: str) -> bool:
+    """
+    Post to the logged-in user's own timeline (home composer).
+
+    Flow: go to feed → open **What's on your mind** → type → **Post** → verify no error.
+    """
+    body = (text or "").strip()[:120]
+    if not body:
+        return False
+
+    _STATUS_LOG.info("Creating own timeline post (%d chars)", len(body))
+
+    for attempt in range(1, 4):
+        await _prepare_own_post_composer(page)
+        use_composer_url = attempt >= 2
+        if not await _open_status_composer(page, prefer_url=use_composer_url):
+            _STATUS_LOG.warning("Status composer open failed (attempt %d/3)", attempt)
+            await random_delay(1.0, 2.0)
+            continue
+
+        await random_delay(0.9, 1.6)
+        await _dismiss_fb_error_dialog(page)
+
+        box = await _locate_status_text_box(page)
+        if box is None:
+            _STATUS_LOG.warning("Status text box not found (attempt %d/3)", attempt)
+            await recover_one_step_back(page, log=_STATUS_LOG, reason="status composer")
+            continue
+
+        if not await _type_status_post(page, box, body):
+            _STATUS_LOG.warning("Could not type status text (attempt %d/3)", attempt)
+            continue
+
+        await random_delay(0.5, 1.0)
+        if await _fb_error_visible(page):
+            await _dismiss_fb_error_dialog(page)
+            continue
+
+        if not await _submit_status_post(page):
+            _STATUS_LOG.warning("Post button not found (attempt %d/3)", attempt)
+            continue
+
+        if await _status_post_publish_ok(page):
+            _STATUS_LOG.info("Own timeline post published (attempt %d)", attempt)
+            await _goto_facebook_feed(page, log=_STATUS_LOG)
+            return True
+
+        if await _fb_error_visible(page):
+            await _dismiss_fb_error_dialog(page)
+            if await _click_try_again_on_error(page) and await _submit_status_post(page):
+                if await _status_post_publish_ok(page):
+                    _STATUS_LOG.info("Own timeline post published after Try again (attempt %d)", attempt)
+                    await _goto_facebook_feed(page, log=_STATUS_LOG)
+                    return True
+
+        _STATUS_LOG.warning(
+            "Post attempt %d failed (error modal or composer still open)",
+            attempt,
+        )
+        await _dismiss_fb_error_dialog(page)
+        await recover_one_step_back(page, log=_STATUS_LOG, reason="status retry")
+
+    _STATUS_LOG.warning("Own timeline post failed after 3 attempts")
     return False
 
 
@@ -1560,21 +2528,151 @@ async def _open_share_sheet(page: Page, post_element: Locator | str) -> bool:
     except Exception:
         pass
     await random_delay(0.35, 0.85)
+
+    try:
+        handle = await post.element_handle(timeout=2_500)
+        if handle is not None:
+            clicked = await handle.evaluate(_CLICK_SHARE_JS)
+            if clicked == "share":
+                _share_log.info("Step 1/4: Share icon clicked (post)")
+                await random_delay(0.8, 1.5)
+                if await story_view_is_open(page):
+                    _share_log.warning(
+                        "Share opened story viewer — skipping reel/story post"
+                    )
+                    await dismiss_story_view(page, log=_share_log)
+                    return False
+                return True
+            if clicked == "more":
+                await random_delay(0.6, 1.1)
+                for lbl in _SHARE_BUTTON_LABELS:
+                    item = page.get_by_role("button", name=re.compile(re.escape(lbl), re.I)).first
+                    try:
+                        if await item.is_visible(timeout=1_200):
+                            await item.click(timeout=3_000)
+                            await random_delay(0.8, 1.5)
+                            return True
+                    except Exception:
+                        continue
+                    loc = page.locator(f'[aria-label="{lbl}"]').first
+                    try:
+                        if await loc.is_visible(timeout=900):
+                            await loc.click(timeout=3_000)
+                            await random_delay(0.8, 1.5)
+                            return True
+                    except Exception:
+                        continue
+    except Exception as exc:
+        _share_log.debug("JS share open failed: %s", exc)
+
     trigger = _default_share_trigger(post)
     try:
-        await trigger.wait_for(state="visible", timeout=5000)
+        if await trigger.is_visible(timeout=2_500):
+            try:
+                await asyncio.wait_for(human_click(page, trigger), timeout=6.0)
+            except Exception:
+                await trigger.click(timeout=3_000)
+            _share_log.info("Step 1/4: Share icon clicked (trigger)")
+            await random_delay(0.8, 1.5)
+            if await story_view_is_open(page):
+                _share_log.warning(
+                    "Share opened story viewer — skipping reel/story post"
+                )
+                await dismiss_story_view(page, log=_share_log)
+                return False
+            return True
     except Exception:
-        _share_log.warning("Share button not visible on post")
-        return False
-    try:
-        await asyncio.wait_for(human_click(page, trigger), timeout=6.0)
-    except Exception:
+        pass
+
+    for sel in (
+        '[aria-label*="Share" i][role="button"]',
+        '[aria-label*="শেয়ার" i][role="button"]',
+        '[aria-label*="শেয়ার" i][role="button"]',
+        '[aria-label*="Bagikan" i][role="button"]',
+    ):
+        loc = post.locator(sel).first
         try:
-            await trigger.click(timeout=3_000)
+            if await loc.is_visible(timeout=1_200):
+                await loc.click(timeout=3_000)
+                _share_log.info("Step 1/4: Share icon clicked (selector)")
+                await random_delay(0.8, 1.5)
+                if await story_view_is_open(page):
+                    _share_log.warning(
+                        "Share opened story viewer — skipping reel/story post"
+                    )
+                    await dismiss_story_view(page, log=_share_log)
+                    return False
+                return True
         except Exception:
-            return False
-    await random_delay(0.8, 1.5)
-    return True
+            continue
+
+    _share_log.warning("Share button not visible on post")
+    return False
+
+
+async def _share_composer_ready(page: Page) -> bool:
+    """True when the repost caption box is already open (skips sheet step 2)."""
+    if await _locate_share_caption_input(page):
+        return True
+    return await _open_share_write_something(page)
+
+
+async def _click_share_to_profile(page: Page) -> bool:
+    """Step 2: choose **Share to profile** / timeline on the share sheet."""
+    await random_delay(0.5, 1.0)
+
+    if await _share_composer_ready(page):
+        _share_log.info("Step 2/4: Share composer ready (caption / Write something)")
+        return True
+
+    timeline_labels = tuple(
+        dict.fromkeys(_SHARE_TO_PROFILE_LABELS + _SHARE_COMPOSER_OPEN_LABELS)
+    )
+
+    for attempt in range(1, 4):
+        btn = page.get_by_role(
+            "button",
+            name=re.compile(
+                r"share\s+to\s+((your|a)\s+)?(profile|timeline|news\s*feed|feed)",
+                re.I,
+            ),
+        ).first
+        try:
+            if await btn.is_visible(timeout=1_200):
+                await asyncio.wait_for(human_click(page, btn), timeout=6.0)
+                _share_log.info("Step 2/4: Share destination (role=button, try %d)", attempt)
+                await random_delay(0.7, 1.3)
+                return True
+        except Exception:
+            pass
+
+        if await _click_first_visible_label(page, _SHARE_TO_PROFILE_LABELS):
+            _share_log.info("Step 2/4: Share to profile (label, try %d)", attempt)
+            return True
+
+        if await _click_first_visible_label(page, timeline_labels):
+            _share_log.info("Step 2/4: Share to timeline/feed (label, try %d)", attempt)
+            return True
+
+        try:
+            picked = await page.evaluate(_CLICK_SHARE_TO_PROFILE_JS)
+            if picked:
+                _share_log.info("Step 2/4: Share destination (JS %r, try %d)", picked, attempt)
+                await random_delay(0.7, 1.3)
+                return True
+        except Exception as exc:
+            _share_log.debug("Share to profile JS failed: %s", exc)
+
+        if await _share_composer_ready(page):
+            return True
+
+        try:
+            await page.evaluate(_SCROLL_SHARE_SHEET_JS)
+        except Exception:
+            pass
+        await random_delay(0.5, 0.9)
+
+    return False
 
 
 async def _click_first_visible_label(page: Page, labels: tuple[str, ...]) -> bool:
@@ -1598,9 +2696,9 @@ async def _click_first_visible_label(page: Page, labels: tuple[str, ...]) -> boo
     return False
 
 
-async def _confirm_share_submit(page: Page) -> bool:
-    if await _click_first_visible_label(page, _SHARE_NOW_LABELS):
-        _share_log.info("Shared via timeline / Share now")
+async def _confirm_share_submit(page: Page, *, allow_instant: bool = True) -> bool:
+    if allow_instant and await _click_first_visible_label(page, _SHARE_INSTANT_ONLY_LABELS):
+        _share_log.info("Shared via instant Share now")
         return True
     if await _click_first_visible_label(page, _SHARE_FINAL_POST_LABELS):
         _share_log.info("Shared via Post/Share confirm")
@@ -1675,26 +2773,265 @@ async def _click_group_by_name(page: Page, group_name: str) -> bool:
     return False
 
 
-async def _share_to_timeline(page: Page, *, caption: str | None = None) -> bool:
-    if caption:
+_CAPTION_TYPED_VERIFY_JS: Final[str] = """
+() => {
+  const placeholder = /write something|say something|what'?s on your mind|কিছু লিখুন|এই সম্পর্কে কিছু/i;
+  const nodes = document.querySelectorAll(
+    '[contenteditable="true"], [data-mcomponent="ServerTextArea"], textarea'
+  );
+  for (const el of nodes) {
+    const t = (el.innerText || el.textContent || '').trim();
+    if (t.length < 3) continue;
+    if (placeholder.test(t)) continue;
+    return t.slice(0, 80);
+  }
+  return false;
+}
+"""
+
+
+async def _ensure_share_caption(
+    post_text: str | None,
+    caption: str | None,
+) -> str | None:
+    """
+    Resolve a non-empty share caption for the post being re-shared.
+    Returns ``None`` when sharing must be aborted (no post text / no caption).
+    """
+    body = (caption or "").strip()
+    if body:
+        return body
+
+    snippet = (post_text or "").strip()
+    if not snippet:
+        _share_log.warning("Share blocked — no post text to write a caption from")
+        return None
+
+    from playwright_automation.ai_comment import (
+        _share_caption_fallback,
+        generate_share_caption_for_post,
+    )
+
+    try:
+        generated = (await generate_share_caption_for_post(snippet) or "").strip()
+    except Exception as exc:
+        _share_log.debug("Share caption generation failed: %s", exc)
+        generated = ""
+
+    if generated:
+        _share_log.info("Share caption ready (%d chars): %r", len(generated), generated[:70])
+        return generated
+
+    fallback = (_share_caption_fallback(snippet) or "").strip()
+    if fallback:
+        _share_log.info("Share caption offline fallback: %r", fallback[:70])
+        return fallback
+
+    _share_log.warning("Share blocked — could not produce any caption")
+    return None
+
+
+async def _share_caption_appears_typed(page: Page) -> bool:
+    try:
+        sample = await page.evaluate(_CAPTION_TYPED_VERIFY_JS)
+        return bool(sample)
+    except Exception:
+        return False
+
+
+async def _open_share_write_something(page: Page) -> bool:
+    """Tap the mobile share placeholder (``ServerTextArea`` / ``Write something``)."""
+    for loc in (
+        page.locator('[data-mcomponent="ServerTextArea"]').first,
+        page.locator('[data-mcomponent="ServerTextArea"]').filter(
+            has_text=re.compile(r"write something|say something|কিছু লিখুন|এই সম্পর্কে", re.I)
+        ).first,
+        page.get_by_role("button", name=re.compile(r"write something|say something", re.I)).first,
+        page.locator('[role="button"]').filter(
+            has_text=re.compile(r"^write something\.?\.?\.?$|^say something", re.I)
+        ).first,
+    ):
         try:
-            box = page.locator('[contenteditable="true"][role="textbox"]').last
-            if await box.is_visible(timeout=1500):
-                await box.click(timeout=2_000)
-                for ch in caption[:300]:
-                    await page.keyboard.type(ch)
-                    await asyncio.sleep(random.uniform(0.03, 0.1))
+            if await loc.is_visible(timeout=1_200):
+                await loc.click(timeout=4_000)
+                _share_log.info("Step 3/4: Write something — opened caption box")
+                await random_delay(0.4, 0.8)
+                return True
+        except Exception:
+            continue
+    try:
+        opened = await page.evaluate(_OPEN_SHARE_WRITE_SOMETHING_JS)
+        if opened:
+            _share_log.info("Opened share caption via JS (%s)", opened)
+            await random_delay(0.4, 0.8)
+            return True
+    except Exception as exc:
+        _share_log.debug("JS open share write-something failed: %s", exc)
+    return False
+
+
+async def _locate_share_caption_input(page: Page) -> Locator | None:
+    """Find the active typing target after the share placeholder was tapped."""
+    feed_composer_skip = re.compile(
+        r"what'?s on your mind|create a post|আপনার মনে কী|পোস্ট তৈরি",
+        re.I,
+    )
+
+    for _ in range(5):
+        for lbl in _SHARE_CAPTION_BOX_LABELS:
+            for cand in (
+                page.locator(f'[aria-label="{lbl}"][contenteditable="true"]'),
+                page.locator(f'[aria-label*="{lbl}" i][contenteditable="true"]'),
+                page.locator(f'div[aria-label="{lbl}"][role="textbox"]'),
+                page.locator(f'div[aria-label*="{lbl}" i][role="textbox"]'),
+            ):
+                try:
+                    if not await cand.first.is_visible(timeout=500):
+                        continue
+                    al = (await cand.first.get_attribute("aria-label")) or ""
+                    if feed_composer_skip.search(al):
+                        continue
+                    return cand.first
+                except Exception:
+                    continue
+
+        for cand in (
+            page.locator('[contenteditable="true"]:focus'),
+            page.locator('[contenteditable="true"][role="textbox"]').last,
+            page.locator('[contenteditable="true"]').last,
+            page.locator('textarea').last,
+        ):
+            try:
+                if not await cand.is_visible(timeout=700):
+                    continue
+                al = (await cand.get_attribute("aria-label")) or ""
+                if feed_composer_skip.search(al):
+                    continue
+                return cand
+            except Exception:
+                continue
+
+        await random_delay(0.35, 0.65)
+    return None
+
+
+async def _type_share_caption(page: Page, box: Locator | None, body: str) -> bool:
+    """Focus the caption field and type ``body`` character by character."""
+    if box is not None:
+        try:
+            await asyncio.wait_for(human_click(page, box), timeout=6.0)
+        except Exception:
+            try:
+                await box.click(timeout=3_000)
+            except Exception:
+                box = None
+    await random_delay(0.2, 0.45)
+
+    if box is not None:
+        try:
+            await box.fill("")
         except Exception:
             pass
-    return await _confirm_share_submit(page)
+
+    for ch in body[:300]:
+        await page.keyboard.type(ch)
+        await asyncio.sleep(random.uniform(0.03, 0.1))
+
+    await random_delay(0.35, 0.7)
+    if not await _share_caption_appears_typed(page):
+        _share_log.warning("Share caption not visible in composer after typing")
+        return False
+
+    _share_log.info("Typed share caption (%d chars): %r", len(body), body[:70])
+    await random_delay(0.4, 0.9)
+    return True
+
+
+async def _fill_share_caption(page: Page, caption: str) -> bool:
+    """Type the share caption into the repost composer (``Write something`` / ServerTextArea)."""
+    body = (caption or "").strip()
+    if not body:
+        return False
+
+    opened = await _open_share_write_something(page)
+    box = await _locate_share_caption_input(page)
+
+    if box is None and not opened:
+        # Last resort: visible ServerTextArea — click then type via keyboard.
+        try:
+            sta = page.locator('[data-mcomponent="ServerTextArea"]').first
+            if await sta.is_visible(timeout=1_500):
+                await sta.click(timeout=3_000)
+                await random_delay(0.35, 0.7)
+                return await _type_share_caption(page, None, body)
+        except Exception:
+            pass
+        _share_log.warning("Share caption box not found (Write something / ServerTextArea)")
+        return False
+
+    return await _type_share_caption(page, box, body)
+
+
+async def _share_to_timeline(page: Page, *, caption: str) -> bool:
+    """
+    Share flow (steps 2–4; step 1 is :func:`_open_share_sheet`):
+
+    1. Share icon (already clicked)
+    2. **Share to profile**
+    3. **Write something** — post-specific caption
+    4. **Post** / Share confirm
+    """
+    body = (caption or "").strip()
+    if not body:
+        _share_log.warning("Share blocked — empty caption")
+        return False
+
+    await random_delay(0.4, 0.9)
+
+    if await story_view_is_open(page):
+        _share_log.warning("Share aborted — still on story viewer (reel/story post)")
+        await dismiss_story_view(page, log=_share_log)
+        return False
+
+    if not await _click_share_to_profile(page):
+        _share_log.warning("Share aborted — Share to profile / timeline not found on sheet")
+        return False
+
+    await random_delay(1.0, 1.6)
+
+    if not await _fill_share_caption(page, body):
+        _share_log.warning("Share aborted — Write something caption not typed")
+        return False
+    _share_log.info("Step 3/4: Share caption typed")
+
+    if await _confirm_share_submit(page, allow_instant=False):
+        _share_log.info("Step 4/4: Share posted")
+        return True
+
+    for lbl in _SHARE_FINAL_POST_LABELS:
+        btn = page.get_by_role("button", name=re.compile(rf"^\s*{re.escape(lbl)}\s*$", re.I)).first
+        try:
+            if await btn.is_visible(timeout=1_200):
+                await btn.click(timeout=3_000)
+                await random_delay(0.8, 1.4)
+                _share_log.info("Step 4/4: Share posted via %r", lbl)
+                return True
+        except Exception:
+            continue
+    _share_log.warning("Share aborted — Post button not found")
+    return False
 
 
 async def _share_to_group(
     page: Page,
     *,
     post_text: str,
-    caption: str | None = None,
+    caption: str,
 ) -> bool:
+    body = (caption or "").strip()
+    if not body:
+        _share_log.warning("Group share blocked — empty caption")
+        return False
     if not await _click_first_visible_label(page, _SHARE_TO_GROUP_LABELS):
         _share_log.warning("Share to group option not found in sheet")
         return False
@@ -1721,17 +3058,10 @@ async def _share_to_group(
         return False
 
     await random_delay(0.7, 1.4)
-    if caption:
-        try:
-            box = page.locator('[contenteditable="true"][role="textbox"]').last
-            if await box.is_visible(timeout=1500):
-                await box.click(timeout=2_000)
-                for ch in caption[:300]:
-                    await page.keyboard.type(ch)
-                    await asyncio.sleep(random.uniform(0.03, 0.1))
-        except Exception:
-            pass
-    ok = await _confirm_share_submit(page)
+    if not await _fill_share_caption(page, body):
+        _share_log.warning("Group share aborted — could not type caption")
+        return False
+    ok = await _confirm_share_submit(page, allow_instant=False)
     if ok:
         _share_log.info("Shared post to group %r", group_name)
     return ok
@@ -1747,12 +3077,16 @@ async def share_post(
     share_now: bool = True,
 ) -> bool:
     """
-    Share a feed post via the mobile/desktop share sheet.
+    Share a feed post via the mobile share sheet.
+
+    **Flow:** Share icon → Share to profile → Write something (caption) → Post.
+
+    A post-specific caption is **mandatory** (no caption = no share).
 
     ``target``:
-      - ``timeline`` — Share to Facebook / news feed
-      - ``group`` — Share to group (Ollama picks best group from visible list)
-      - ``auto`` — Brain chooses timeline vs group from post text + groups
+      - ``timeline`` — profile share flow above (own timeline)
+      - ``group`` — Share to group (Ollama picks group), then caption + Post
+      - ``auto`` — profile share first, then group fallback
     """
     if not share_now:
         return await _open_share_sheet(page, post_element)
@@ -1760,32 +3094,46 @@ async def share_post(
     if not await _open_share_sheet(page, post_element):
         return False
 
-    resolved_target: ShareTarget = target
-    if target == "auto":
-        groups = await _collect_share_group_names(page)
-        if not groups:
-            if await _click_first_visible_label(page, _SHARE_TO_GROUP_LABELS):
-                await random_delay(0.7, 1.2)
-                groups = await _collect_share_group_names(page)
-        from playwright_automation.brain import decide_share_destination
-
-        snippet = (post_text or "").strip()
-        choice = decide_share_destination(snippet, groups)
-        resolved_target = "group" if choice.get("target") == "group" else "timeline"
-        _share_log.info("Brain share target: %s (%s)", resolved_target, choice)
+    resolved_caption = await _ensure_share_caption(post_text, caption)
+    if not resolved_caption:
+        return False
 
     try:
+        if target == "timeline":
+            return await _share_to_timeline(page, caption=resolved_caption)
+
+        resolved_target: ShareTarget = target
+        if target == "auto":
+            if await _share_to_timeline(page, caption=resolved_caption):
+                return True
+            _share_log.info("Timeline share failed — trying group fallback")
+
+        if target == "auto":
+            groups = await _collect_share_group_names(page)
+            if not groups:
+                if await _click_first_visible_label(page, _SHARE_TO_GROUP_LABELS):
+                    await random_delay(0.7, 1.2)
+                    groups = await _collect_share_group_names(page)
+            from playwright_automation.brain import decide_share_destination
+
+            snippet = (post_text or "").strip()
+            choice = decide_share_destination(snippet, groups)
+            resolved_target = "group" if choice.get("target") == "group" else "timeline"
+            _share_log.info("Brain share target: %s (%s)", resolved_target, choice)
+
         if resolved_target == "group":
-            ok = await _share_to_group(page, post_text=post_text or "", caption=caption)
+            ok = await _share_to_group(
+                page,
+                post_text=post_text or "",
+                caption=resolved_caption,
+            )
             if ok:
                 return True
-            _share_log.info("Group share failed — trying timeline")
-        return await _share_to_timeline(page, caption=caption)
+            _share_log.info("Group share failed — trying timeline again")
+            return await _share_to_timeline(page, caption=resolved_caption)
+        return False
     finally:
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
+        await recover_one_step_back(page, log=_share_log, reason="share_post cleanup")
         await random_delay(0.4, 0.9)
 
 
@@ -2011,4 +3359,5 @@ async def react_to_post(
             ) from exc
 
     await random_delay(0.06, 0.2)
+    await recover_one_step_back(page, log=_react_log, reason="after reaction")
     _react_log.info("Finished %s reaction", display_label)
