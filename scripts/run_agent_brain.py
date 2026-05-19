@@ -46,7 +46,7 @@ from playwright_automation.agent_executor import (  # noqa: E402
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-19-ollama-port-18000-v22"
+_AGENT_BUILD = "2026-05-19-import-browser-stay-v23"
 _DAILY_SHARE_STATE = "daily_share_quota.json"
 from playwright_automation.bot_core import BaseBot  # noqa: E402
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
@@ -86,29 +86,26 @@ def _load_daily_share_state(profile_dir: Path) -> tuple[str, int, list[str]]:
 async def _wait_until_browser_closed(bot: BaseBot, page, log: logging.Logger) -> None:
     """Keep Chromium open until the user closes the tab/window (not auto-close on script end)."""
     log.info(
-        "Browser will stay open until you close the Facebook tab/window. "
-        "Press Ctrl+C in this terminal to stop the agent loop only."
+        "Browser stays open until YOU close the Facebook tab/window. "
+        "Errors do not auto-close the browser."
     )
     while True:
         try:
-            if page.is_closed():
-                log.info("Browser tab closed — ending session")
-                break
             ctx = bot.context
             if ctx is None:
+                log.info("Browser context ended — exiting wait")
                 break
-            try:
-                if not ctx.pages:
-                    log.info("All browser tabs closed — ending session")
-                    break
-            except Exception:
+            pages = [p for p in ctx.pages if not p.is_closed()]
+            if not pages:
+                log.info("All browser tabs closed — ending session")
                 break
-            await asyncio.sleep(0.75)
+            await asyncio.sleep(1.0)
         except asyncio.CancelledError:
+            log.info("Wait interrupted — closing browser")
             break
         except Exception as exc:
             log.debug("wait_until_browser_closed: %s", exc)
-            break
+            await asyncio.sleep(1.0)
 
 
 def _save_daily_share_state(profile_dir: Path, session) -> None:
@@ -357,6 +354,7 @@ async def _run(args: argparse.Namespace) -> None:
             pass
 
     feed_pre_warmed = False
+    loop_failed = False
     try:
         await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=60_000)
         await asyncio.sleep(random.uniform(1.5, 3.0))
@@ -443,14 +441,24 @@ async def _run(args: argparse.Namespace) -> None:
             profile_dir=profile_dir,
             feed_pre_warmed=feed_pre_warmed,
         )
-        if args.keep_browser_open:
-            await _wait_until_browser_closed(bot, page, log)
-    finally:
-        try:
-            if bot.context is not None:
-                await bot.stop(persist_storage_state=True)
-        except Exception as exc:
-            log.debug("Browser shutdown: %s", exc)
+    except asyncio.CancelledError:
+        log.info("Agent interrupted — browser stays open until you close the tab.")
+        raise
+    except Exception as exc:
+        loop_failed = True
+        log.exception(
+            "Agent error (browser will stay open until you close the tab): %s",
+            exc,
+        )
+    if args.keep_browser_open:
+        await _wait_until_browser_closed(bot, page, log)
+    try:
+        if bot.context is not None:
+            await bot.stop(persist_storage_state=True)
+    except Exception as exc:
+        log.debug("Browser shutdown: %s", exc)
+    if loop_failed:
+        raise SystemExit(1)
 
 
 def main() -> None:

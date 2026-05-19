@@ -36,7 +36,10 @@ from playwright_automation.agent_brain import (
     AgentDecision,
     AgentState,
     LocationType,
+    decide_next_action,
+    offline_engagement_decision,
 )
+from playwright_automation.brain import BrainError, ollama_is_available
 from playwright_automation.ai_comment import (
     generate_comment_for_post,
     generate_share_caption_for_post,
@@ -924,9 +927,6 @@ async def agent_step(
         session.steps_off_feed = 0
 
     state = await gather_agent_state(page, session)
-
-    from playwright_automation.agent_brain import offline_engagement_decision
-    from playwright_automation.brain import BrainError, decide_next_action, ollama_is_available
 
     if session.ollama_available is None:
         session.ollama_available = ollama_is_available()
