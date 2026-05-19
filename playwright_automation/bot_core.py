@@ -171,6 +171,11 @@ class BaseBot:
         scroll_rounds: int | None = None,
         stalk_min: int | None = None,
         stalk_max: int | None = None,
+        profile_stalk_min_sec: float | None = None,
+        profile_stalk_max_sec: float | None = None,
+        profile_stalk_max_engagements: int | None = None,
+        profile_stalk_min_appeal: float | None = None,
+        profile_stalk_use_ollama: bool | None = None,
         return_to_feed_after: bool = True,
     ) -> int:
         """Scroll ≥50×, stalk 2–4 profiles, send when friends/followers ≥ threshold."""
@@ -185,6 +190,16 @@ class BaseBot:
             kwargs["stalk_min"] = stalk_min
         if stalk_max is not None:
             kwargs["stalk_max"] = stalk_max
+        if profile_stalk_min_sec is not None:
+            kwargs["profile_stalk_min_sec"] = profile_stalk_min_sec
+        if profile_stalk_max_sec is not None:
+            kwargs["profile_stalk_max_sec"] = profile_stalk_max_sec
+        if profile_stalk_max_engagements is not None:
+            kwargs["profile_stalk_max_engagements"] = profile_stalk_max_engagements
+        if profile_stalk_min_appeal is not None:
+            kwargs["profile_stalk_min_appeal"] = profile_stalk_min_appeal
+        if profile_stalk_use_ollama is not None:
+            kwargs["profile_stalk_use_ollama"] = profile_stalk_use_ollama
         kwargs["return_to_feed_after"] = return_to_feed_after
         return await facebook_graph.send_friend_requests_from_suggestions(
             self.context,

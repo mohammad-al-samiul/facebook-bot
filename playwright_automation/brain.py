@@ -42,11 +42,38 @@ class PostAnalysis:
 
 
 def _ollama_base_url() -> str:
-    return os.environ.get("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL).rstrip("/")
+    """
+    Resolve Ollama HTTP base URL.
+
+    Priority:
+    1. ``OLLAMA_BASE_URL`` (e.g. ``http://127.0.0.1:18000``)
+    2. ``OLLAMA_HOST`` (Ollama CLI style, e.g. ``127.0.0.1:18000``)
+    3. Default ``http://127.0.0.1:11434``
+    """
+    explicit = (os.environ.get("OLLAMA_BASE_URL") or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    host = (os.environ.get("OLLAMA_HOST") or "").strip()
+    if host:
+        if host.startswith("http://") or host.startswith("https://"):
+            return host.rstrip("/")
+        return f"http://{host}".rstrip("/")
+    return DEFAULT_OLLAMA_BASE_URL
 
 
 def _default_model() -> str:
     return os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL)
+
+
+def ollama_is_available(*, base_url: str | None = None, timeout: float = 4.0) -> bool:
+    """True when Ollama responds on the chat API port (used before brain mode)."""
+    url = f"{(base_url or _ollama_base_url()).rstrip('/')}/api/tags"
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            r = client.get(url)
+        return r.status_code < 400
+    except Exception:
+        return False
 
 
 def _chat(

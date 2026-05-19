@@ -4,13 +4,22 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-DEFAULT_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-DEFAULT_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(_ROOT))
+
+from dotenv import load_dotenv
+
+load_dotenv(_ROOT / ".env", override=False)
+
+from playwright_automation.brain import _default_model, _ollama_base_url
+
+DEFAULT_URL = _ollama_base_url()
+DEFAULT_MODEL = _default_model()
 
 
 def _model_is_available(requested: str, installed: list[str]) -> tuple[bool, list[str]]:
@@ -35,7 +44,7 @@ def main() -> int:
         print("  ", exc)
         print()
         print("Start the Ollama desktop app (Windows tray), then run this script again.")
-        print("Do not run 'ollama serve' unless nothing is listening on port 11434.")
+        print(f"Use the same host as ollama serve, e.g. export OLLAMA_HOST=127.0.0.1:18000")
         return 1
 
     names = [m.get("name", "?") for m in data.get("models", [])]
@@ -54,7 +63,7 @@ def main() -> int:
         print(f"Warning: OLLAMA_MODEL={DEFAULT_MODEL!r} not in list. Run: ollama pull {DEFAULT_MODEL}")
     print()
     print("You do NOT need: ollama serve")
-    print("(That error only means port 11434 is already in use — which is correct.)")
+    print(f"Bot .env should set OLLAMA_HOST / OLLAMA_BASE_URL to {DEFAULT_URL}")
     return 0
 
 

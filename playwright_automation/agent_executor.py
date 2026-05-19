@@ -36,8 +36,6 @@ from playwright_automation.agent_brain import (
     AgentDecision,
     AgentState,
     LocationType,
-    decide_next_action,
-    fallback_decision,
 )
 from playwright_automation.ai_comment import (
     generate_comment_for_post,
@@ -98,6 +96,8 @@ class AgentSession:
     cycles_on_same_location: int = 0
     steps_off_feed: int = 0
     last_action: str | None = None
+    ollama_available: bool | None = None
+    offline_step: int = 0
 
 
 def _today_key() -> str:
@@ -155,14 +155,16 @@ async def _share_one_to_own_timeline(
         return False
 
     picked = None
-    for _pick_try in range(5):
+    for _pick_try in range(8):
         candidate = await pick_fresh_visible_post(
             page,
             rng=rng,
             exclude_fingerprints=_share_exclude(session),
         )
         if candidate is None:
-            break
+            await human_scroll(page, segments=rng.randint(3, 6))
+            await random_delay(1.0, 2.0)
+            continue
         post_cand, text_cand = candidate
         if await post_is_story_or_reel(post_cand):
             fp_skip = _fingerprint((text_cand or "").strip())
@@ -541,16 +543,14 @@ async def _engage_one_post(
     snippet = (text or "").strip()
     from playwright_automation.ai_comment import is_commentable_feed_post
 
-    if not snippet or not is_commentable_feed_post(snippet, min_chars=20):
+    if not snippet or not is_commentable_feed_post(snippet, min_chars=14):
         _log.warning("Post not suitable for comment (nested/chrome/too short) — skipping")
         return False
 
-    # When commenting, use Like (avoids angry/love mismatch from noisy scraped text).
-    reaction = (
-        ReactionType.LIKE
-        if do_comment
-        else pick_reaction_for_post(snippet, rng)
-    )
+    # Prefer Like (reliable on mobile); non-like reactions often time out on the rail.
+    reaction = ReactionType.LIKE if do_comment else ReactionType.LIKE
+    if not do_comment and rng.random() < 0.22:
+        reaction = pick_reaction_for_post(snippet, rng)
     comment_body = (
         await generate_comment_for_post(
             snippet,
@@ -566,18 +566,31 @@ async def _engage_one_post(
         pass
     await random_delay(0.5, 1.2)
 
-    timeout_sec = 12.0 if reaction.value == "like" else 24.0
+    timeout_sec = 12.0 if reaction.value == "like" else 22.0
+    reacted = False
     try:
         await asyncio.wait_for(react_to_post(page, post, reaction), timeout=timeout_sec)
+        reacted = True
+    except Exception as exc:
+        _log.warning("Feed reaction failed (%s): %s", reaction.value, exc or type(exc).__name__)
+        if reaction.value != "like":
+            try:
+                await asyncio.wait_for(
+                    react_to_post(page, post, ReactionType.LIKE),
+                    timeout=12.0,
+                )
+                reacted = True
+                _log.info("Feed: fallback Like after %s failed", reaction.value)
+            except Exception as exc2:
+                _log.warning("Feed Like fallback failed: %s", exc2 or type(exc2).__name__)
+    if reacted:
         session.likes_this_session += 1
         session.last_action = "like"
         session.recent_actions.append("like")
         _mark_post_engaged(session, snippet)
-        _log.info("Feed: reacted %s on post", reaction.value)
-    except Exception as exc:
-        _log.warning("Feed reaction failed: %s", exc)
-        if not do_comment:
-            return False
+        _log.info("Feed: reacted on post")
+    elif not do_comment:
+        return False
 
     if do_comment:
         await random_delay(0.6, 1.4)
@@ -672,9 +685,9 @@ async def _human_feed_beat(
     One natural feed rhythm: scroll & read → like+comment → extra like → share.
     """
     _log.info("--- Feed beat %d/%d (scroll → like → comment → share) ---", beat_index, beat_total)
-    await human_scroll(page, segments=rng.randint(3, 6))
+    await human_scroll(page, segments=rng.randint(4, 7))
     session.recent_actions.append("scroll")
-    await random_delay(2.0, 4.0)
+    await random_delay(3.0, 5.5)
 
     if await _engage_one_post(page, session, rng=rng, do_comment=True):
         _log.info("Beat %d: like + comment done", beat_index)
@@ -710,12 +723,14 @@ async def force_feed_comment(
     if not await ensure_newsfeed_with_posts(page):
         _log.warning("force_feed_comment: no feed posts")
         return False
-    ok = await _engage_one_post(page, session, rng=r, do_comment=True)
-    if ok:
-        _log.info("force_feed_comment: success")
-    else:
-        _log.warning("force_feed_comment: all retries failed")
-    return ok
+    for attempt in range(1, 4):
+        if await _engage_one_post(page, session, rng=r, do_comment=True):
+            _log.info("force_feed_comment: success (attempt %d)", attempt)
+            return True
+        await human_scroll(page, segments=r.randint(3, 6))
+        await random_delay(1.0, 2.0)
+    _log.warning("force_feed_comment: all retries failed")
+    return False
 
 
 async def run_structured_cycle(
@@ -731,6 +746,11 @@ async def run_structured_cycle(
     friend_scroll_rounds: int = 50,
     friend_stalk_min: int = 2,
     friend_stalk_max: int = 4,
+    profile_stalk_min_sec: float = 28.0,
+    profile_stalk_max_sec: float = 45.0,
+    profile_stalk_max_engagements: int = 2,
+    profile_stalk_min_appeal: float = 42.0,
+    profile_stalk_use_ollama: bool = True,
     min_daily_shares: int = 20,
 ) -> None:
     """
@@ -765,6 +785,11 @@ async def run_structured_cycle(
                 scroll_rounds=friend_scroll_rounds,
                 stalk_min=friend_stalk_min,
                 stalk_max=friend_stalk_max,
+                profile_stalk_min_sec=profile_stalk_min_sec,
+                profile_stalk_max_sec=profile_stalk_max_sec,
+                profile_stalk_max_engagements=profile_stalk_max_engagements,
+                profile_stalk_min_appeal=profile_stalk_min_appeal,
+                profile_stalk_use_ollama=profile_stalk_use_ollama,
                 return_to_feed_after=False,
             )
             if sent:
@@ -899,11 +924,42 @@ async def agent_step(
         session.steps_off_feed = 0
 
     state = await gather_agent_state(page, session)
-    try:
-        decision = decide_next_action(state)
-    except BrainError as exc:
-        _log.warning("Brain error: %s", exc)
-        decision = fallback_decision(state, reason=str(exc))
+
+    from playwright_automation.agent_brain import offline_engagement_decision
+    from playwright_automation.brain import BrainError, decide_next_action, ollama_is_available
+
+    if session.ollama_available is None:
+        session.ollama_available = ollama_is_available()
+        if not session.ollama_available:
+            from playwright_automation.brain import _ollama_base_url
+
+            _log.warning(
+                "Ollama not reachable at %s — offline engagement. "
+                "Serve: export OLLAMA_HOST=127.0.0.1:18000 && ollama serve",
+                _ollama_base_url(),
+            )
+
+    if session.ollama_available:
+        try:
+            decision = decide_next_action(state)
+        except BrainError as exc:
+            session.ollama_available = False
+            _log.warning("Ollama failed — switching to offline engagement: %s", exc)
+            decision = offline_engagement_decision(
+                state,
+                offline_step=session.offline_step,
+                comments_this_session=session.comments_this_session,
+                likes_this_session=session.likes_this_session,
+            )
+            session.offline_step += 1
+    else:
+        decision = offline_engagement_decision(
+            state,
+            offline_step=session.offline_step,
+            comments_this_session=session.comments_this_session,
+            likes_this_session=session.likes_this_session,
+        )
+        session.offline_step += 1
 
     await execute_agent_decision(bot, page, decision, session)
 

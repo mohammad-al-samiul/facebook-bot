@@ -305,12 +305,56 @@ def decide_next_action(
     return enforce_agent_rules(decision, state)
 
 
-def fallback_decision(state: AgentState, *, reason: str) -> AgentDecision:
-    """Safe scroll when the brain is unreachable."""
+def offline_engagement_decision(
+    state: AgentState,
+    *,
+    offline_step: int,
+    comments_this_session: int = 0,
+    likes_this_session: int = 0,
+) -> AgentDecision:
+    """
+    Rotate like / comment / share / post when Ollama is down (no API calls).
+    Text still comes from Gemini + offline templates in ``ai_comment``.
+    """
+    on_feed = state.feed_has_posts and state.location == "newsfeed"
+
+    if not on_feed:
+        return AgentDecision(
+            thought_process="Ollama offline — returning to home feed.",
+            location="newsfeed",
+            action="navigate_to",
+            target_url="https://www.facebook.com/",
+            action_data=AgentActionData(),
+        )
+
+    plan: tuple[tuple[str, str], ...] = (
+        ("comment", "Ollama offline — comment on feed (Gemini/Ollama text)."),
+        ("like", "Ollama offline — like a feed post."),
+        ("comment", "Ollama offline — another comment."),
+        ("like", "Ollama offline — like."),
+        ("share_post", "Ollama offline — share to profile."),
+        ("create_post", "Ollama offline — status post."),
+    )
+
+    if comments_this_session < 1:
+        action, thought = "comment", "Ollama offline — first comment this cycle."
+    elif likes_this_session < comments_this_session:
+        action, thought = "like", "Ollama offline — like after comment."
+    else:
+        action, thought = plan[offline_step % len(plan)]
+
+    from typing import cast
+
     return AgentDecision(
-        thought_process=f"Fallback: {reason}",
-        location=state.location,
-        action="scroll",
+        thought_process=thought,
+        location="newsfeed",
+        action=cast(ActionType, action),
         target_url=None,
         action_data=AgentActionData(),
     )
+
+
+def fallback_decision(state: AgentState, *, reason: str) -> AgentDecision:
+    """Backward-compatible alias — never scroll-only on Ollama errors."""
+    _ = reason
+    return offline_engagement_decision(state, offline_step=0)

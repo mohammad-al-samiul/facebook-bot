@@ -127,7 +127,7 @@ _NESTED_POST_SNIPPET_RE: Final[re.Pattern[str]] = re.compile(
 )
 
 
-def is_commentable_feed_post(text: str, *, min_chars: int = 28) -> bool:
+def is_commentable_feed_post(text: str, *, min_chars: int = 16) -> bool:
     """True for a main feed story worth commenting on (not nested share/comment UI)."""
     snippet = clean_post_text((text or "").strip())
     if not is_usable_post_snippet(snippet, min_chars=min_chars):
@@ -135,10 +135,15 @@ def is_commentable_feed_post(text: str, *, min_chars: int = 28) -> bool:
     if _NESTED_POST_SNIPPET_RE.search(snippet):
         return False
     # Scraped whole card with nested blocks often has many short lines.
-    if snippet.count("\n") > 6:
+    if snippet.count("\n") > 8:
         return False
-    words = [w for w in re.split(r"\s+", snippet) if len(w) > 1]
-    if len(words) < 4:
+    words = [w for w in re.split(r"\s+", snippet) if len(w) > 0]
+    if len(words) < 2:
+        return False
+    # Bengali posts often have fewer space-separated tokens but long words.
+    if len(snippet) >= 24 and len(words) >= 2:
+        return True
+    if len(words) < 3:
         return False
     return True
 
@@ -958,7 +963,7 @@ async def generate_comment_for_post(
         logger.debug("Ollama import/call failed: %s", exc)
 
     try:
-        gemini_text = await get_ai_comment(snippet, timeout=min(timeout, 30.0))
+        gemini_text = await get_ai_comment(snippet, timeout=min(timeout, 45.0))
         if _accept(gemini_text):
             logger.info("Comment from Gemini (%s): %r", lang, gemini_text[:60])
             return gemini_text

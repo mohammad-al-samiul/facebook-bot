@@ -584,7 +584,7 @@ async def pick_random_visible_post(
         if not await _post_is_visible(post):
             continue
         text = await _post_text_snippet(post)
-        if not text or not is_commentable_feed_post(text):
+        if not text or not is_commentable_feed_post(text, min_chars=14):
             continue
         if not await _post_is_top_level_feed_post(post):
             continue
@@ -595,6 +595,20 @@ async def pick_random_visible_post(
     if candidates:
         return r.choice(candidates)
 
+    # Looser pass: mobile feed cards often fail the top-level heuristic.
+    loose: list[tuple[Locator, str]] = []
+    for post in scan:
+        if not await _post_is_visible(post):
+            continue
+        text = await _post_text_snippet(post)
+        if not text or not is_commentable_feed_post(text, min_chars=12):
+            continue
+        if _fingerprint(text) in skip:
+            continue
+        loose.append((post, text))
+    if loose:
+        return r.choice(loose)
+
     # Last resort: usable story (still skip nested share cards).
     for post in scan:
         if not await _post_is_visible(post):
@@ -602,9 +616,7 @@ async def pick_random_visible_post(
         text = await _post_text_snippet(post) or ""
         if not text or _fingerprint(text) in skip:
             continue
-        if not is_usable_post_snippet(text):
-            continue
-        if not await _post_is_top_level_feed_post(post):
+        if not is_usable_post_snippet(text, min_chars=12):
             continue
         return post, text
     return None

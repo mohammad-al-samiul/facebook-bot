@@ -41,10 +41,12 @@ from playwright_automation.agent_executor import (  # noqa: E402
     browse_feed_warmup,
     force_feed_comment,
     run_structured_cycle,
+    shares_remaining_today,
+    _share_one_to_own_timeline,
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-18-status-post-fix-v16"
+_AGENT_BUILD = "2026-05-19-ollama-port-18000-v22"
 _DAILY_SHARE_STATE = "daily_share_quota.json"
 from playwright_automation.bot_core import BaseBot  # noqa: E402
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
@@ -160,6 +162,11 @@ async def _agent_loop(
     friend_scroll_rounds: int,
     friend_stalk_min: int,
     friend_stalk_max: int,
+    profile_stalk_min_sec: float,
+    profile_stalk_max_sec: float,
+    profile_stalk_max_engagements: int,
+    profile_stalk_min_appeal: float,
+    profile_stalk_use_ollama: bool,
     min_daily_shares: int,
     feed_warmup_segments: int,
     profile_dir: Path,
@@ -167,6 +174,10 @@ async def _agent_loop(
 ) -> None:
     session = AgentSession()
     session.feed_pre_warmed = feed_pre_warmed
+    if mode == "brain":
+        from playwright_automation.brain import ollama_is_available
+
+        session.ollama_available = ollama_is_available()
     _apply_daily_share_state(session, profile_dir)
     cycle_num = 0
     while not stop.is_set():
@@ -187,23 +198,58 @@ async def _agent_loop(
                 friend_scroll_rounds=friend_scroll_rounds,
                 friend_stalk_min=friend_stalk_min,
                 friend_stalk_max=friend_stalk_max,
+                profile_stalk_min_sec=profile_stalk_min_sec,
+                profile_stalk_max_sec=profile_stalk_max_sec,
+                profile_stalk_max_engagements=profile_stalk_max_engagements,
+                profile_stalk_min_appeal=profile_stalk_min_appeal,
+                profile_stalk_use_ollama=profile_stalk_use_ollama,
                 min_daily_shares=min_daily_shares,
                 feed_warmup_segments=feed_warmup_segments,
             )
             _save_daily_share_state(profile_dir, session)
         else:
-            log.warning(
-                "brain mode: LLM picks actions (may scroll a lot). "
-                "Prefer: python scripts/run_agent_brain.py   (structured, comments every cycle)"
-            )
+            log.info("======== Starting brain cycle #%d (Ollama llama3.1) ========", cycle_num)
             session.comments_this_session = 0
+            session.likes_this_session = 0
+            rng = random.Random()
+            if not skip_friends:
+                from playwright_automation.actions import return_to_feed
+                from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE
+
+                try:
+                    sent = await bot.send_friend_requests_from_suggestions(
+                        page=page,
+                        min_audience=DEFAULT_MIN_AUDIENCE,
+                        max_send=max_friend_send,
+                        scroll_rounds=max(friend_scroll_rounds, 50),
+                        stalk_min=friend_stalk_min,
+                        stalk_max=friend_stalk_max,
+                        profile_stalk_min_sec=profile_stalk_min_sec,
+                        profile_stalk_max_sec=profile_stalk_max_sec,
+                        profile_stalk_max_engagements=profile_stalk_max_engagements,
+                        profile_stalk_min_appeal=profile_stalk_min_appeal,
+                        profile_stalk_use_ollama=profile_stalk_use_ollama,
+                        return_to_feed_after=True,
+                    )
+                    if sent:
+                        log.info("Brain cycle: friend requests sent=%d", sent)
+                except Exception as exc:
+                    log.warning("Brain friend phase skipped: %s", exc)
+                await return_to_feed(page, log=log)
+                await random_delay(2.0, 4.0)
             await force_feed_comment(page, session)
+            if shares_remaining_today(session, min_daily_shares) > 0:
+                await _share_one_to_own_timeline(
+                    page,
+                    session,
+                    rng=rng,
+                    min_daily_shares=min_daily_shares,
+                )
             for step_i in range(steps_per_burst):
                 if stop.is_set():
                     break
                 if step_i == 0:
                     await force_feed_comment(page, session)
-                # Every burst: at least one own post when the feed is ready.
                 if step_i == steps_per_burst - 1 and "create_post" not in session.recent_actions[-20:]:
                     from playwright_automation.agent_brain import AgentActionData, AgentDecision
                     from playwright_automation.agent_executor import execute_agent_decision
@@ -229,7 +275,15 @@ async def _agent_loop(
                     decision.location,
                     decision.thought_process[:100],
                 )
-                await random_delay(2.0, 5.0)
+                await random_delay(3.0, 7.0)
+            if shares_remaining_today(session, min_daily_shares) > 0:
+                await _share_one_to_own_timeline(
+                    page,
+                    session,
+                    rng=rng,
+                    min_daily_shares=min_daily_shares,
+                )
+            _save_daily_share_state(profile_dir, session)
 
         gap = random.uniform(min_pause, max_pause)
         log.info("Pause %.1fs before next cycle", gap)
@@ -322,7 +376,20 @@ async def _run(args: argparse.Namespace) -> None:
         )
         feed_pre_warmed = True
 
-        log.info("Agent build %s | mode=%s | Ctrl+C to stop", _AGENT_BUILD, args.mode)
+        effective_mode = args.mode
+        if args.mode == "brain":
+            from playwright_automation.brain import _ollama_base_url, ollama_is_available
+
+            ollama_url = _ollama_base_url()
+            if not ollama_is_available():
+                log.warning(
+                    "Ollama is NOT reachable at %s — offline comment/like mode. "
+                    "Match your serve terminal: export OLLAMA_HOST=127.0.0.1:18000 && ollama serve",
+                    ollama_url,
+                )
+            else:
+                log.info("Ollama OK at %s", ollama_url)
+        log.info("Agent build %s | mode=%s | Ctrl+C to stop", _AGENT_BUILD, effective_mode)
         if args.mode == "structured":
             if args.skip_friends:
                 log.info(
@@ -333,13 +400,24 @@ async def _run(args: argparse.Namespace) -> None:
                 )
             else:
                 log.info(
-                    "structured cycle: friends → stalk %d–%d → feed engage × %d",
+                    "structured cycle: friends → stalk %d–%d (~%.0f–%.0fs, "
+                    "like+comment ≤%d best posts) → feed × %d",
                     args.friend_stalk_min,
                     args.friend_stalk_max,
+                    args.profile_stalk_min_sec,
+                    args.profile_stalk_max_sec,
+                    args.profile_stalk_max_engagements,
                     args.feed_rounds,
                 )
         else:
-            log.info("Each brain burst also runs force_feed_comment() before LLM steps")
+            log.info(
+                "brain cycle: Ollama steps=%d | profile stalk %.0f–%.0fs, "
+                "≤%d appealing posts/profile",
+                args.steps_per_burst,
+                args.profile_stalk_min_sec,
+                args.profile_stalk_max_sec,
+                args.profile_stalk_max_engagements,
+            )
         await _agent_loop(
             bot,
             page,
@@ -355,6 +433,11 @@ async def _run(args: argparse.Namespace) -> None:
             friend_scroll_rounds=args.friend_scroll_rounds,
             friend_stalk_min=args.friend_stalk_min,
             friend_stalk_max=args.friend_stalk_max,
+            profile_stalk_min_sec=args.profile_stalk_min_sec,
+            profile_stalk_max_sec=args.profile_stalk_max_sec,
+            profile_stalk_max_engagements=args.profile_stalk_max_engagements,
+            profile_stalk_min_appeal=args.profile_stalk_min_appeal,
+            profile_stalk_use_ollama=args.profile_stalk_use_ollama,
             min_daily_shares=args.min_daily_shares,
             feed_warmup_segments=args.feed_warmup_segments,
             profile_dir=profile_dir,
@@ -384,14 +467,14 @@ def main() -> None:
     p.add_argument(
         "--mode",
         choices=("structured", "brain"),
-        default="structured",
-        help="structured=feed engagement (default); brain=LLM picks each action",
+        default="brain",
+        help="brain=Ollama llama3.1 picks each action (default); structured=fixed feed cycle",
     )
     p.add_argument(
         "--skip-friends",
         action="store_true",
-        default=True,
-        help="Skip friends tab scroll/send/accept (default: on)",
+        default=False,
+        help="Skip friends tab scroll/send/accept",
     )
     p.add_argument(
         "--friends",
@@ -408,6 +491,35 @@ def main() -> None:
     )
     p.add_argument("--friend-stalk-min", type=int, default=2, help="Min profiles to open and check per cycle")
     p.add_argument("--friend-stalk-max", type=int, default=4, help="Max profiles to open and check per cycle")
+    p.add_argument(
+        "--profile-stalk-min-sec",
+        type=float,
+        default=28.0,
+        help="Seconds to browse each stalked profile/page (min)",
+    )
+    p.add_argument(
+        "--profile-stalk-max-sec",
+        type=float,
+        default=45.0,
+        help="Seconds to browse each stalked profile/page (max)",
+    )
+    p.add_argument(
+        "--profile-stalk-engage",
+        type=int,
+        default=2,
+        help="Max like+comment per profile (only appealing posts, not all)",
+    )
+    p.add_argument(
+        "--profile-stalk-min-appeal",
+        type=float,
+        default=42.0,
+        help="Minimum appeal score 0–100 to engage on a profile post",
+    )
+    p.add_argument(
+        "--no-profile-ollama-pick",
+        action="store_true",
+        help="Use heuristic only (skip Ollama pick among top profile posts)",
+    )
     p.add_argument("--max-friend-accept", type=int, default=2, help="Friend requests to accept per cycle")
     p.add_argument("--feed-rounds", type=int, default=6, help="Scroll+like+comment+share rounds on newsfeed")
     p.add_argument(
@@ -422,9 +534,9 @@ def main() -> None:
         default=20,
         help="Minimum shares per day to own timeline (post-specific caption)",
     )
-    p.add_argument("--steps-per-burst", type=int, default=3, help="(brain mode) steps before pause")
-    p.add_argument("--min-pause", type=float, default=5.0)
-    p.add_argument("--max-pause", type=float, default=12.0)
+    p.add_argument("--steps-per-burst", type=int, default=6, help="(brain mode) Ollama steps per cycle")
+    p.add_argument("--min-pause", type=float, default=8.0)
+    p.add_argument("--max-pause", type=float, default=18.0)
     p.add_argument(
         "--keep-browser-open",
         action=argparse.BooleanOptionalAction,
@@ -437,8 +549,11 @@ def main() -> None:
         action="store_false",
         help="Close browser automatically when the script ends",
     )
+    args = p.parse_args()
+    args.profile_stalk_max_engagements = args.profile_stalk_engage
+    args.profile_stalk_use_ollama = not args.no_profile_ollama_pick
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    asyncio.run(_run(p.parse_args()))
+    asyncio.run(_run(args))
 
 
 if __name__ == "__main__":

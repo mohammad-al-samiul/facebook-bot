@@ -15,6 +15,12 @@ ShareTarget = Literal["timeline", "group", "auto"]
 
 from playwright.async_api import Locator, Page
 
+from playwright_automation.human_behavior import (
+    human_review_pause,
+    human_type_into_focused,
+    human_type_natural,
+)
+
 _btn_log = logging.getLogger("playwright_automation.actions.submit")
 _react_log = logging.getLogger("playwright_automation.actions.react")
 _comment_log = logging.getLogger("playwright_automation.actions.comment")
@@ -566,12 +572,12 @@ async def human_type(
             await page.keyboard.press("Delete")
         except Exception:
             pass
-    lo_ms = max(0, min(min_delay_ms, max_delay_ms))
-    hi_ms = max(min_delay_ms, max_delay_ms)
-    for ch in text:
-        await page.keyboard.type(ch)
-        delay = random.uniform(lo_ms / 1000.0, hi_ms / 1000.0)
-        await asyncio.sleep(delay)
+    await human_type_natural(
+        page,
+        text,
+        char_min_ms=max(0, min(min_delay_ms, max_delay_ms)),
+        char_max_ms=max(min_delay_ms, max_delay_ms),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1584,7 +1590,7 @@ async def _open_post_comment_composer(page: Page, post: Locator) -> bool:
         if handle is not None:
             clicked = await handle.evaluate(_CLICK_COMMENT_JS)
             if clicked:
-                await random_delay(0.55, 1.1)
+                await random_delay(0.7, 1.5)
                 return True
     except Exception as exc:
         _comment_log.debug("JS comment open failed: %s", exc)
@@ -1651,7 +1657,8 @@ async def comment_on_post(
             return False
         composer_opened = True
 
-        await random_delay(0.5, 1.1)
+        # Brief pause as if deciding what to write.
+        await random_delay(0.9, 2.4)
 
         # Try to find an editable comment box, scoped to the post first then global.
         box: Locator | None = None
@@ -1704,16 +1711,14 @@ async def comment_on_post(
                 await box.click(timeout=3_000)
             except Exception:
                 return False
-        await random_delay(0.25, 0.6)
+        await random_delay(0.35, 0.85)
+        await human_type_into_focused(
+            page,
+            text,
+            rng=random.Random(),
+        )
 
-        for ch in text:
-            await page.keyboard.type(ch)
-            delay = random.uniform(type_min_delay, type_max_delay)
-            if random.random() < 0.06:
-                delay += random.uniform(0.2, 0.7)
-            await asyncio.sleep(delay)
-
-        await random_delay(0.5, 1.1)
+        await human_review_pause(min_sec=0.8, max_sec=2.4)
         if submit:
             return await _submit_comment(page, box, text)
         return True
@@ -1982,6 +1987,7 @@ async def _submit_comment(page: Page, box: Locator, original_text: str) -> bool:
     Each step has its own small timeout so a slow one cannot stall the
     whole pipeline.
     """
+    await random_delay(0.25, 0.65)
     async def _editor_empty() -> bool:
         try:
             current = (await box.inner_text(timeout=800) or "").strip()
@@ -2348,27 +2354,32 @@ async def _type_status_post(page: Page, box: Locator | None, body: str) -> bool:
                 await box.click(timeout=3_000)
             except Exception:
                 box = None
-    await random_delay(0.35, 0.7)
+    await random_delay(0.45, 1.0)
     if box is not None:
+        try:
+            await human_type_into_focused(page, text, rng=random.Random())
+            await human_review_pause(min_sec=1.0, max_sec=2.8)
+            sample_ok = await _status_composer_has_text(page, text)
+            if sample_ok:
+                _STATUS_LOG.info("Status typed naturally (%d chars)", len(text))
+                return True
+        except Exception as exc:
+            _STATUS_LOG.debug("Natural status typing failed: %s", exc)
         try:
             handle = await box.element_handle(timeout=2_000)
             if handle is not None:
                 ok = bool(await handle.evaluate(_SET_STATUS_TEXT_JS, text))
                 if ok:
-                    await random_delay(0.4, 0.8)
+                    await random_delay(0.6, 1.2)
                     return True
         except Exception as exc:
             _STATUS_LOG.debug("JS status type failed: %s", exc)
-        try:
-            await box.fill(text)
-            await random_delay(0.4, 0.8)
-            return True
-        except Exception:
-            pass
-    for ch in text:
-        await page.keyboard.type(ch)
-        await asyncio.sleep(random.uniform(0.03, 0.08))
-    await random_delay(0.5, 1.0)
+    await human_type_natural(page, text)
+    await human_review_pause(min_sec=0.9, max_sec=2.2)
+    return await _status_composer_has_text(page, text)
+
+
+async def _status_composer_has_text(page: Page, text: str) -> bool:
     try:
         sample = await page.evaluate(
             """() => {
@@ -2386,6 +2397,7 @@ async def _type_status_post(page: Page, box: Locator | None, body: str) -> bool:
 
 
 async def _submit_status_post(page: Page) -> bool:
+    await human_review_pause(min_sec=0.6, max_sec=1.8)
     scopes: list = [page.locator('[role="dialog"]'), page]
     for scope in scopes:
         for lbl in _STATUS_POST_SUBMIT_LABELS:
@@ -2470,7 +2482,7 @@ async def create_feed_post(page: Page, text: str) -> bool:
             await random_delay(1.0, 2.0)
             continue
 
-        await random_delay(0.9, 1.6)
+        await random_delay(1.1, 2.6)
         await _dismiss_fb_error_dialog(page)
 
         box = await _locate_status_text_box(page)
@@ -2697,6 +2709,7 @@ async def _click_first_visible_label(page: Page, labels: tuple[str, ...]) -> boo
 
 
 async def _confirm_share_submit(page: Page, *, allow_instant: bool = True) -> bool:
+    await human_review_pause(min_sec=0.7, max_sec=2.0)
     if allow_instant and await _click_first_visible_label(page, _SHARE_INSTANT_ONLY_LABELS):
         _share_log.info("Shared via instant Share now")
         return True
@@ -2929,15 +2942,15 @@ async def _type_share_caption(page: Page, box: Locator | None, body: str) -> boo
 
     if box is not None:
         try:
-            await box.fill("")
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Delete")
+            await random_delay(0.15, 0.35)
         except Exception:
             pass
 
-    for ch in body[:300]:
-        await page.keyboard.type(ch)
-        await asyncio.sleep(random.uniform(0.03, 0.1))
+    await human_type_into_focused(page, body[:300], rng=random.Random())
+    await human_review_pause(min_sec=0.7, max_sec=2.2)
 
-    await random_delay(0.35, 0.7)
     if not await _share_caption_appears_typed(page):
         _share_log.warning("Share caption not visible in composer after typing")
         return False
@@ -3272,6 +3285,7 @@ async def react_to_post(
 
     if key_l == ReactionType.LIKE.value:
         _react_log.info("Like: single tap (no long-press rail)")
+        await random_delay(0.4, 1.3)
         await human_click(page, trigger)
         _react_log.info("Like reaction finished")
         return

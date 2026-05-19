@@ -9,7 +9,7 @@ import asyncio
 import logging
 import random
 import re
-from typing import Literal
+from typing import Final, Literal
 from urllib.parse import urlparse
 
 from playwright.async_api import BrowserContext, Locator, Page, TimeoutError as PlaywrightTimeoutError
@@ -201,8 +201,45 @@ def _normalize_profile_url(href: str) -> str | None:
 _FRIEND_SUGGESTIONS_URLS: tuple[str, ...] = (
     "https://www.facebook.com/friends/?target_pivot_link=suggestions",
     "https://www.facebook.com/friends/center/suggestions/",
+    "https://m.facebook.com/friends/center/suggestions/",
+    "https://m.facebook.com/friends/",
     "https://www.facebook.com/friends/",
 )
+
+_COLLECT_SUGGESTION_PROFILES_JS: Final[str] = """
+() => {
+  const seen = new Set();
+  const out = [];
+  const addRe = /add\\s*friend|friend\\s*request|বন্ধু|যোগ/i;
+  const skipPath = /\\/friends|\\/groups|\\/watch|\\/login|\\/help/i;
+  const buttons = document.querySelectorAll('[role="button"], a[role="button"]');
+  for (const btn of buttons) {
+    const label = (btn.innerText || btn.getAttribute('aria-label') || '');
+    if (!addRe.test(label)) continue;
+    let el = btn;
+    for (let depth = 0; depth < 14 && el; depth++) {
+      const links = el.querySelectorAll('a[href]');
+      for (const a of links) {
+        let href = a.href || a.getAttribute('href') || '';
+        if (!href || skipPath.test(href)) continue;
+        if (href.includes('profile.php?id=')) {
+          const m = href.match(/id=(\\d+)/);
+          if (m) href = 'https://www.facebook.com/profile.php?id=' + m[1];
+        } else if (!/facebook\\.com\\//i.test(href)) {
+          continue;
+        }
+        if (seen.has(href)) continue;
+        seen.add(href);
+        let rowText = (el.innerText || '').slice(0, 400);
+        out.push({ href, rowText });
+        break;
+      }
+      el = el.parentElement;
+    }
+  }
+  return out;
+}
+"""
 
 
 def _add_friend_button(page: Page):
@@ -385,14 +422,20 @@ async def _collect_visible_suggestion_profiles(
     """Profile URLs from visible Add Friend rows + optional inline audience count."""
     results: list[tuple[str, int | None]] = []
     seen: set[str] = set()
+
+    for profile_url, inline in await _collect_suggestion_profiles_js(page):
+        if profile_url not in seen:
+            seen.add(profile_url)
+            results.append((profile_url, inline))
+
     buttons = _add_friend_button(page)
     try:
         total = await buttons.count()
     except Exception:
         return results
-    for i in range(total):
+    for i in range(min(total, 40)):
         btn = buttons.nth(i)
-        if not await _safe_visible(btn, timeout_ms=800):
+        if not await _safe_visible(btn, timeout_ms=1_200):
             continue
         profile_url = await _profile_url_near_button(page, btn)
         if not profile_url or profile_url in seen:
@@ -456,11 +499,14 @@ async def _profile_url_near_button(page: Page, button: Locator) -> str | None:
         href = await button.evaluate(
             """(btn) => {
                 let el = btn;
-                for (let i = 0; i < 14 && el; i++) {
-                    const link = el.querySelector(
-                        'a[href*="facebook.com"][role="link"], a[href*="/profile.php"]'
-                    );
-                    if (link && link.href) return link.href;
+                for (let i = 0; i < 16 && el; i++) {
+                    for (const link of el.querySelectorAll('a[href]')) {
+                        const h = link.href || link.getAttribute('href') || '';
+                        if (!h || /\\/friends|\\/groups|\\/watch/i.test(h)) continue;
+                        if (h.includes('profile.php?id=') || /facebook\\.com\\/[^/?]+/i.test(h)) {
+                            return h;
+                        }
+                    }
                     el = el.parentElement;
                 }
                 return null;
@@ -471,6 +517,29 @@ async def _profile_url_near_button(page: Page, button: Locator) -> str | None:
     if isinstance(href, str):
         return _normalize_profile_url(href)
     return None
+
+
+async def _collect_suggestion_profiles_js(page: Page) -> list[tuple[str, int | None]]:
+    """Bulk-scan Add Friend rows for profile URLs (works when per-button walk fails)."""
+    results: list[tuple[str, int | None]] = []
+    seen: set[str] = set()
+    try:
+        raw = await page.evaluate(_COLLECT_SUGGESTION_PROFILES_JS)
+    except Exception as exc:
+        _log.debug("JS suggestion profile scan failed: %s", exc)
+        return results
+    if not isinstance(raw, list):
+        return results
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        href = _normalize_profile_url(str(item.get("href") or ""))
+        if not href or href in seen:
+            continue
+        seen.add(href)
+        inline = _parse_audience_count_text(str(item.get("rowText") or ""))
+        results.append((href, inline))
+    return results
 
 
 async def _dismiss_request_row(page: Page, button: Locator) -> bool:
@@ -558,6 +627,11 @@ async def send_friend_requests_from_suggestions(
     scroll_rounds: int = MIN_FRIEND_SUGGESTION_SCROLLS,
     stalk_min: int = DEFAULT_FRIEND_STALK_MIN,
     stalk_max: int = DEFAULT_FRIEND_STALK_MAX,
+    profile_stalk_min_sec: float = 28.0,
+    profile_stalk_max_sec: float = 45.0,
+    profile_stalk_max_engagements: int = 2,
+    profile_stalk_min_appeal: float = 42.0,
+    profile_stalk_use_ollama: bool = True,
     return_to_feed_after: bool = True,
 ) -> int:
     """
@@ -599,9 +673,30 @@ async def send_friend_requests_from_suggestions(
             threshold,
         )
 
+        empty_scrolls = 0
         for scroll_i in range(scroll_rounds):
             await raise_if_account_restricted(p)
             candidates = await _collect_visible_suggestion_profiles(p)
+            if not candidates:
+                empty_scrolls += 1
+                if empty_scrolls in (8, 20) and len(pool) == 0:
+                    _log.info(
+                        "Friend pool still empty — re-opening suggestions (scroll %d)",
+                        scroll_i + 1,
+                    )
+                    active_url = await _navigate_friend_suggestions(
+                        p, navigation_timeout=navigation_timeout,
+                    )
+            else:
+                empty_scrolls = 0
+            if len(pool) >= stalk_max * 4 and scroll_i >= 12:
+                _log.info(
+                    "Friend pool has %d profiles — stopping scroll early at %d/%d",
+                    len(pool),
+                    scroll_i + 1,
+                    scroll_rounds,
+                )
+                break
             new_urls = 0
             for profile_url, inline_count in candidates:
                 if profile_url not in pool:
@@ -672,20 +767,34 @@ async def send_friend_requests_from_suggestions(
                     timeout=int(navigation_timeout),
                 )
                 await raise_if_account_restricted(p)
-                await random_delay(1.0, 1.8)
-                _log.info("Stalking profile — reading timeline")
-                await smooth_scroll(
-                    p,
-                    total_pixels=rng.randint(280, 480),
-                    duration_sec=rng.uniform(1.8, 3.0),
+                dwell_lo = max(4.0, float(profile_stalk_min_sec))
+                dwell_hi = max(dwell_lo + 1.0, float(profile_stalk_max_sec))
+                _log.info(
+                    "Stalking profile — browse ~%.0f–%.0fs, then like/comment best posts only",
+                    dwell_lo,
+                    dwell_hi,
                 )
-                await random_delay(0.8, 1.6)
-                await smooth_scroll(
-                    p,
-                    total_pixels=rng.randint(160, 300),
-                    duration_sec=rng.uniform(1.2, 2.0),
+                from playwright_automation.profile_engagement import (
+                    browse_profile_timeline,
+                    engage_selective_on_profile,
                 )
-                await random_delay(0.6, 1.2)
+
+                await browse_profile_timeline(
+                    p,
+                    rng=rng,
+                    min_sec=dwell_lo,
+                    max_sec=dwell_hi,
+                )
+                engaged = await engage_selective_on_profile(
+                    p,
+                    rng=rng,
+                    max_posts=max(0, int(profile_stalk_max_engagements)),
+                    min_appeal=float(profile_stalk_min_appeal),
+                    use_ollama_pick=profile_stalk_use_ollama,
+                )
+                if engaged:
+                    _log.info("Profile stalk: engaged %d appealing post(s)", engaged)
+                await random_delay(1.0, 2.2)
             except Exception as exc:
                 _log.warning("Profile open failed: %s", exc)
                 continue
