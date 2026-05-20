@@ -149,7 +149,7 @@ class BaseBot:
         """
         Open a Facebook profile and send a friend request only if the UI still shows **Add Friend**.
 
-        Skips when friends/followers are below threshold (default 3000). Raises
+        Skips when friends/followers are below threshold (default 2000 via ``MIN_AUDIENCE_FRIEND_REQUEST``). Raises
         :class:`AccountRestrictedError` if a restriction dialog appears.
         """
         return await facebook_graph.send_friend_request(
@@ -178,7 +178,10 @@ class BaseBot:
         profile_stalk_use_ollama: bool | None = None,
         return_to_feed_after: bool = True,
     ) -> int:
-        """Scroll ≥50×, stalk 2–4 profiles, send when friends/followers ≥ threshold."""
+        """
+        Open suggestions, light-scroll to collect IDs, stalk 2–4 profiles (~1–2 min browse),
+        send requests when friends/followers ≥ threshold (default from env, 2000).
+        """
         kwargs: dict = {
             "min_friends": min_friends,
             "min_audience": min_audience,

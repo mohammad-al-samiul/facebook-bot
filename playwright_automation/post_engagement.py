@@ -165,7 +165,8 @@ _POST_IS_STORY_OR_REEL_JS: Final[str] = """
   if (!root) return false;
   for (const a of root.querySelectorAll('a[href]')) {
     const h = (a.getAttribute('href') || '').toLowerCase();
-    if (h.includes('story.php') || h.includes('/reel/') || h.includes('/reels/')) return true;
+    if (h.includes('story.php') || h.includes('/reel/') || h.includes('/reels/')
+        || h.includes('/stories/')) return true;
   }
   const t = (root.innerText || '').toLowerCase();
   if (/\\b(reels?|#reel)\\b/.test(t) && root.querySelector('video')) return true;
@@ -548,6 +549,45 @@ async def has_feed_posts(page: Page) -> bool:
     return False
 
 
+async def collect_visible_post_snippets_for_memory(
+    page: Page,
+    *,
+    limit: int = 14,
+    max_chars: int = 240,
+) -> list[str]:
+    """
+    Short text samples from **visible** feed posts (scroll/warmup sampling).
+
+    Used to keep a light session memory of what the feed is talking about so
+    status drafts can follow current topics instead of random seasonal lines.
+    """
+    posts = await _iter_post_locators(page, 22)
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for post in posts[:26]:
+        try:
+            if not await _post_is_visible(post):
+                continue
+            raw = await _post_text_snippet(post)
+        except Exception:
+            continue
+        text = clean_post_text((raw or "").strip(), max_chars=max_chars)
+        if not text or len(text) < 18:
+            continue
+        if not is_commentable_feed_post(text, min_chars=16):
+            continue
+        fp = _fingerprint(text)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        out.append(text)
+        if len(out) >= limit:
+            break
+
+    return out
+
+
 async def pick_random_visible_post(
     page: Page,
     *,
@@ -694,6 +734,7 @@ async def pick_fresh_visible_post(
 __all__ = [
     "PostEngagementResult",
     "SessionState",
+    "collect_visible_post_snippets_for_memory",
     "engage_with_next_posts",
     "has_feed_posts",
     "pick_fresh_visible_post",

@@ -224,7 +224,7 @@ async def _maybe_friend_graph_actions(bot: BaseBot, page: Page, *, log_: logging
             page=page,
             min_audience=DEFAULT_MIN_AUDIENCE,
             max_send=4,
-            scroll_rounds=50,
+            scroll_rounds=6,
             stalk_min=2,
             stalk_max=4,
         )

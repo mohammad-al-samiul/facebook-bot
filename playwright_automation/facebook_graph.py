@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 from typing import Final, Literal
@@ -24,9 +25,11 @@ FriendRequestStatus = Literal[
 ]
 FollowStatus = Literal["followed", "already_following", "not_applicable", "unavailable"]
 
-DEFAULT_MIN_AUDIENCE: int = 3000
+DEFAULT_MIN_AUDIENCE: int = int(os.environ.get("MIN_AUDIENCE_FRIEND_REQUEST", "2000"))
 DEFAULT_MIN_FRIENDS: int = DEFAULT_MIN_AUDIENCE  # backward-compatible alias
-MIN_FRIEND_SUGGESTION_SCROLLS: int = 50
+
+# Heavy 50× scroll is not needed — collect visible rows, then light scroll a few times only.
+MAX_FRIEND_SUGGESTION_SCROLLS: int = 10
 DEFAULT_FRIEND_STALK_MIN: int = 2
 DEFAULT_FRIEND_STALK_MAX: int = 4
 
@@ -624,25 +627,29 @@ async def send_friend_requests_from_suggestions(
     min_friends: int = DEFAULT_MIN_AUDIENCE,
     min_audience: int | None = None,
     max_send: int = 4,
-    scroll_rounds: int = MIN_FRIEND_SUGGESTION_SCROLLS,
+    scroll_rounds: int = 6,
     stalk_min: int = DEFAULT_FRIEND_STALK_MIN,
     stalk_max: int = DEFAULT_FRIEND_STALK_MAX,
-    profile_stalk_min_sec: float = 28.0,
-    profile_stalk_max_sec: float = 45.0,
-    profile_stalk_max_engagements: int = 2,
+    profile_stalk_min_sec: float = 55.0,
+    profile_stalk_max_sec: float = 125.0,
+    profile_stalk_max_engagements: int = 0,
     profile_stalk_min_appeal: float = 42.0,
     profile_stalk_use_ollama: bool = True,
     return_to_feed_after: bool = True,
 ) -> int:
     """
-    Phase 1: scroll friend suggestions (≥50 rounds) and collect profile IDs.
-    Phase 2: intelligently pick 2–4 profiles, open each, send request only when
-    friends **or** followers ≥ ``min_audience`` (default 3000), then return to feed.
+    Open friend suggestions, collect a **small** pool with light scrolling (not 50× marathon),
+    stalk ``stalk_min``–``stalk_max`` profiles for ``profile_stalk_*_sec`` each (read timeline),
+    optionally like/comment on timeline (``profile_stalk_max_engagements``; default 0 =
+    browse-only).
+
+    Send friend request only when parsed friends **or** followers ≥ ``min_audience``
+    (default 2000; override with env ``MIN_AUDIENCE_FRIEND_REQUEST``).
     """
     from playwright_automation.actions import random_delay, smooth_scroll
 
     threshold = min_audience if min_audience is not None else min_friends
-    scroll_rounds = max(MIN_FRIEND_SUGGESTION_SCROLLS, int(scroll_rounds))
+    scroll_cap = max(1, min(int(scroll_rounds), MAX_FRIEND_SUGGESTION_SCROLLS))
     stalk_min = max(1, min(stalk_min, stalk_max))
     stalk_max = max(stalk_min, stalk_max)
     max_send = max(1, min(max_send, stalk_max))
@@ -664,24 +671,26 @@ async def send_friend_requests_from_suggestions(
             )
 
         _log.info(
-            "Friend suggestions phase 1: scroll %d×, then stalk %d–%d profile(s), "
-            "send max %d (friends or followers ≥ %d)",
-            scroll_rounds,
+            "Friend suggestions: up to %d light scroll(s), then stalk %d–%d profile(s) "
+            "~%.0f–%.0fs each, max %d request(s) if friends/followers ≥ %d",
+            scroll_cap,
             stalk_min,
             stalk_max,
+            profile_stalk_min_sec,
+            profile_stalk_max_sec,
             max_send,
             threshold,
         )
 
         empty_scrolls = 0
-        for scroll_i in range(scroll_rounds):
+        for scroll_i in range(scroll_cap):
             await raise_if_account_restricted(p)
             candidates = await _collect_visible_suggestion_profiles(p)
             if not candidates:
                 empty_scrolls += 1
-                if empty_scrolls in (8, 20) and len(pool) == 0:
+                if empty_scrolls in (3, 6) and len(pool) == 0:
                     _log.info(
-                        "Friend pool still empty — re-opening suggestions (scroll %d)",
+                        "Friend pool empty — re-opening suggestions (pass %d)",
                         scroll_i + 1,
                     )
                     active_url = await _navigate_friend_suggestions(
@@ -689,14 +698,7 @@ async def send_friend_requests_from_suggestions(
                     )
             else:
                 empty_scrolls = 0
-            if len(pool) >= stalk_max * 4 and scroll_i >= 12:
-                _log.info(
-                    "Friend pool has %d profiles — stopping scroll early at %d/%d",
-                    len(pool),
-                    scroll_i + 1,
-                    scroll_rounds,
-                )
-                break
+
             new_urls = 0
             for profile_url, inline_count in candidates:
                 if profile_url not in pool:
@@ -707,28 +709,28 @@ async def send_friend_requests_from_suggestions(
                 ):
                     pool[profile_url] = inline_count
 
-            if (scroll_i + 1) % 10 == 0 or scroll_i == 0:
+            if (scroll_i + 1) % 2 == 1 or scroll_i == 0:
                 _log.info(
-                    "Scroll %d/%d — visible %d, pool %d (+%d new)",
+                    "Suggestions pass %d/%d — visible %d, pool %d (+%d new)",
                     scroll_i + 1,
-                    scroll_rounds,
+                    scroll_cap,
                     len(candidates),
                     len(pool),
                     new_urls,
                 )
 
-            await smooth_scroll(
-                p,
-                total_pixels=rng.randint(340, 620),
-                duration_sec=rng.uniform(1.6, 2.8),
-            )
-            if scroll_i % 7 == 6:
+            need = max(stalk_max * 3, 8)
+            if len(pool) >= need and scroll_i >= 1:
+                _log.info("Friend pool has %d profiles — stopping light scroll early", len(pool))
+                break
+
+            if scroll_i < scroll_cap - 1:
                 await smooth_scroll(
                     p,
-                    total_pixels=rng.randint(120, 220),
-                    duration_sec=rng.uniform(0.9, 1.4),
+                    total_pixels=rng.randint(280, 480),
+                    duration_sec=rng.uniform(1.2, 2.2),
                 )
-            await random_delay(0.45, 0.95)
+                await random_delay(0.5, 1.0)
 
         stalk_list = _pick_profiles_to_stalk(
             pool,
@@ -756,10 +758,6 @@ async def send_friend_requests_from_suggestions(
                 profile_url,
             )
 
-            if inline_hint is not None and inline_hint < 400:
-                _log.info("Skip stalk — inline audience too low")
-                continue
-
             try:
                 await p.goto(
                     profile_url,
@@ -770,9 +768,10 @@ async def send_friend_requests_from_suggestions(
                 dwell_lo = max(4.0, float(profile_stalk_min_sec))
                 dwell_hi = max(dwell_lo + 1.0, float(profile_stalk_max_sec))
                 _log.info(
-                    "Stalking profile — browse ~%.0f–%.0fs, then like/comment best posts only",
+                    "Stalking profile — browse ~%.0f–%.0fs%s",
                     dwell_lo,
                     dwell_hi,
+                    " (read-only)" if max(0, int(profile_stalk_max_engagements)) <= 0 else ", then like/comment if enabled",
                 )
                 from playwright_automation.profile_engagement import (
                     browse_profile_timeline,
@@ -850,8 +849,8 @@ async def send_friend_requests_from_suggestions(
                 pass
 
         _log.info(
-            "Friend suggestions done — scrolls=%d pool=%d stalked=%d sent=%d",
-            scroll_rounds,
+            "Friend suggestions done — light passes=%d pool=%d stalked=%d sent=%d",
+            scroll_cap,
             len(pool),
             len(stalk_list),
             sent,
@@ -877,7 +876,7 @@ async def accept_pending_requests(
     max_skips_without_progress: int = 6,
 ) -> int:
     """
-    Confirm pending requests only when friends **or** followers ≥ ``min_audience`` (default 3000).
+    Confirm pending requests only when friends **or** followers ≥ ``min_audience`` (default from env ``MIN_AUDIENCE_FRIEND_REQUEST``, 2000).
     Always returns to the news feed when using a shared ``page``.
     """
     threshold = min_audience if min_audience is not None else min_friends

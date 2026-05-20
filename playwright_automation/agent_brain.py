@@ -2,7 +2,7 @@
 Autonomous Facebook agent decision brain (Ollama).
 
 Returns strict JSON decisions parsed into :class:`AgentDecision`.
-Server-side rules enforce the 3k+ friend/follower law even if the model errs.
+Server-side rules enforce the 2k+ friend/follower law even if the model errs.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ AGENT_SYSTEM_PROMPT = """You are the advanced brain of an autonomous, human-like
 You must strictly analyze the input data provided by the user (current page type, target's follower count, context) and follow the strict business logic provided below.
 
 ### STRICT LAWS OF OPERATION:
-1. Friend Request Logic: You can ONLY accept or send friend requests if the target user has MORE THAN 3,000 (3k) followers or friends. If they have less, you MUST skip or decline.
+1. Friend Request Logic: You can ONLY accept or send friend requests if the target user has at least 2,000 (2k) followers or friends. If they have less, you MUST skip or decline.
 2. Human Simulation: Humans do not repeat the same task forever. You must switch between Newsfeed, Pages, Groups, Profiles, and Self-Posting to look natural. Do not spam comments.
 2b. Comment language: If the visible post contains Bengali script, comment_text must be in Bengali only. If the post is English-only, comment_text must be English only — never mix languages.
 3. Behavior Variety: Mix up your actions (e.g., scroll without liking, read a post without commenting).
@@ -177,7 +177,7 @@ def enforce_agent_rules(decision: AgentDecision, state: AgentState) -> AgentDeci
     min_a = DEFAULT_MIN_AUDIENCE
 
     if decision.action in ("send_friend_request", "accept_friend_request"):
-        if aud is not None and aud <= min_a:
+        if aud is not None and aud < min_a:
             return AgentDecision(
                 thought_process=(
                     f"Blocked {decision.action}: audience {aud} is not above {min_a}. "
@@ -287,7 +287,7 @@ def decide_next_action(
     user = (
         "Given the account state below, output exactly one next action as JSON only.\n\n"
         f"{state.to_prompt_context()}\n\n"
-        "Remember: friend requests only if target_audience_count > 3000. "
+        "Remember: friend requests only if target_audience_count >= 2000. "
         "Prefer variety if recent_actions repeat the same action."
     )
     raw = _chat(

@@ -24,13 +24,13 @@ from playwright_automation.actions import (
     react_to_post,
     smooth_scroll,
     resume_feed_after_comment,
+    resume_feed_after_share,
     dismiss_story_view,
     recover_one_step_back,
     recover_until_feed,
     return_to_feed,
     story_view_is_open,
     share_post,
-    smooth_scroll,
 )
 from playwright_automation.agent_brain import (
     AgentDecision,
@@ -46,11 +46,11 @@ from playwright_automation.ai_comment import (
     generate_status_post,
     pick_reaction_for_post,
 )
-from playwright_automation.brain import BrainError
 from playwright_automation.bot_core import BaseBot
 from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE, parse_profile_audience_count
 from playwright_automation.post_engagement import (
     _fingerprint,
+    collect_visible_post_snippets_for_memory,
     has_feed_posts,
     pick_fresh_visible_post,
     pick_random_visible_post,
@@ -58,6 +58,45 @@ from playwright_automation.post_engagement import (
 )
 
 _log = logging.getLogger(__name__)
+
+_FEED_MEMORY_CAP = 48
+_FEED_MEMORY_SAMPLE_LIMIT = 12
+
+
+def append_feed_memory(session: AgentSession, snippets: list[str]) -> None:
+    """Deduped FIFO buffer of recent feed text (session-scoped topic memory)."""
+
+    seen = {_fingerprint(x) for x in session.feed_memory_snippets[-36:]}
+    for raw in snippets:
+        s = (raw or "").strip()
+        if len(s) < 18:
+            continue
+        fp = _fingerprint(s)
+        if fp in seen:
+            continue
+        seen.add(fp)
+        session.feed_memory_snippets.append(s)
+    while len(session.feed_memory_snippets) > _FEED_MEMORY_CAP:
+        session.feed_memory_snippets.pop(0)
+
+
+async def ingest_feed_memory_from_viewport(
+    page: Page,
+    session: AgentSession,
+    *,
+    limit: int = _FEED_MEMORY_SAMPLE_LIMIT,
+) -> None:
+    try:
+        samples = await collect_visible_post_snippets_for_memory(page, limit=limit)
+    except Exception as exc:
+        _log.debug("Feed memory ingest failed: %s", exc)
+        return
+    if samples:
+        append_feed_memory(session, samples)
+
+
+def _recent_feed_memory_blob(session: AgentSession, *, max_snippets: int = 22) -> list[str]:
+    return session.feed_memory_snippets[-max_snippets:]
 
 _FEED_HOME = "https://www.facebook.com/"
 _FRIEND_REQUESTS = "https://www.facebook.com/friends/requests"
@@ -101,6 +140,7 @@ class AgentSession:
     last_action: str | None = None
     ollama_available: bool | None = None
     offline_step: int = 0
+    feed_memory_snippets: list[str] = field(default_factory=list)
 
 
 def _today_key() -> str:
@@ -190,8 +230,12 @@ async def _share_one_to_own_timeline(
     if not snippet or not is_commentable_feed_post(snippet, min_chars=20):
         _log.warning("Share skipped — need readable post text for caption")
         return False
-    if re.search(r"#\s*reels?\b|\bwatch\s+reel\b", snippet, re.I):
-        _log.warning("Share skipped — reel post (different share UI)")
+    if re.search(
+        r"#\s*reels?\b|\bwatch\s+reel\b|/stories/|\bview\s+story\b|\bstory\s+by\b",
+        snippet,
+        re.I,
+    ):
+        _log.warning("Share skipped — story/reel post (different share UI)")
         fp_reel = _post_share_fingerprint(snippet)
         if fp_reel:
             session.shared_post_fingerprints.add(fp_reel)
@@ -224,7 +268,7 @@ async def _share_one_to_own_timeline(
             min_daily_shares,
             share_cap[:60],
         )
-        await resume_feed_after_comment(page, log=_log, scroll_segments=3)
+        await resume_feed_after_share(page, log=_log, scroll_segments=3)
         await random_delay(1.0, 2.0)
         return True
 
@@ -456,7 +500,7 @@ async def execute_agent_decision(
             if fp:
                 session.shared_post_fingerprints.add(fp)
                 session.engaged_post_fingerprints.add(fp)
-            await resume_feed_after_comment(page, log=_log, scroll_segments=2)
+            await resume_feed_after_share(page, log=_log, scroll_segments=2)
         return ok
 
     if action == "send_friend_request":
@@ -504,6 +548,7 @@ async def execute_agent_decision(
         if not draft:
             draft, _ = await generate_status_post(
                 avoid_styles=session.recent_post_styles[-6:],
+                feed_memory_snippets=_recent_feed_memory_blob(session),
             )
         ok = await create_feed_post(page, draft)
         if ok:
@@ -631,9 +676,13 @@ async def browse_feed_warmup(
     rng: random.Random | None = None,
     scroll_segments: int | None = None,
     label: str = "warmup",
+    session: AgentSession | None = None,
 ) -> None:
     """
     Scroll/read the feed like a human **before** any likes or comments.
+
+    When ``session`` is set, visible post snippets are sampled during the browse
+    so later status drafts can reflect what the feed is actually talking about.
     """
     r = rng if rng is not None else random.Random()
     segs = scroll_segments if scroll_segments is not None else r.randint(10, 16)
@@ -671,6 +720,8 @@ async def browse_feed_warmup(
         if (i + 1) % 4 == 0:
             _log.info("Feed browse (%s): scrolled %d/%d segments", label, i + 1, segs)
         await random_delay(1.5, 3.8)
+        if session is not None and ((i + 1) % 3 == 0 or i + 1 == segs):
+            await ingest_feed_memory_from_viewport(page, session)
 
     _log.info("Feed browse (%s) done — starting engagement", label)
 
@@ -690,6 +741,7 @@ async def _human_feed_beat(
     _log.info("--- Feed beat %d/%d (scroll → like → comment → share) ---", beat_index, beat_total)
     await human_scroll(page, segments=rng.randint(4, 7))
     session.recent_actions.append("scroll")
+    await ingest_feed_memory_from_viewport(page, session)
     await random_delay(3.0, 5.5)
 
     if await _engage_one_post(page, session, rng=rng, do_comment=True):
@@ -746,7 +798,7 @@ async def run_structured_cycle(
     max_friend_accept: int = 2,
     feed_rounds: int = 2,
     feed_warmup_segments: int = 12,
-    friend_scroll_rounds: int = 50,
+    friend_scroll_rounds: int = 6,
     friend_stalk_min: int = 2,
     friend_stalk_max: int = 4,
     profile_stalk_min_sec: float = 28.0,
@@ -779,7 +831,7 @@ async def run_structured_cycle(
             _log.warning("Feed has no posts — skipping engagement this cycle")
             return
     else:
-        _log.info("======== Phase 1/3: Friend suggestions (scroll → stalk → ≥%d) ========", DEFAULT_MIN_AUDIENCE)
+        _log.info("======== Phase 1/3: Suggestions (light scroll → stalk 2–4 → ≥%d) ========", DEFAULT_MIN_AUDIENCE)
         try:
             sent = await bot.send_friend_requests_from_suggestions(
                 page=page,
@@ -790,7 +842,7 @@ async def run_structured_cycle(
                 stalk_max=friend_stalk_max,
                 profile_stalk_min_sec=profile_stalk_min_sec,
                 profile_stalk_max_sec=profile_stalk_max_sec,
-                profile_stalk_max_engagements=profile_stalk_max_engagements,
+                profile_stalk_max_engagements=0,
                 profile_stalk_min_appeal=profile_stalk_min_appeal,
                 profile_stalk_use_ollama=profile_stalk_use_ollama,
                 return_to_feed_after=False,
@@ -848,11 +900,13 @@ async def run_structured_cycle(
             rng=rng,
             scroll_segments=warmup_segs,
             label="before engage",
+            session=session,
         )
         session.feed_pre_warmed = True
     else:
         await human_scroll(page, segments=rng.randint(2, 4))
         await random_delay(1.5, 2.5)
+        await ingest_feed_memory_from_viewport(page, session)
 
     for r in range(feed_rounds):
         await _human_feed_beat(
@@ -896,7 +950,11 @@ async def run_structured_cycle(
     except Exception:
         pass
     await random_delay(1.5, 2.5)
-    status, style = await generate_status_post(avoid_styles=session.recent_post_styles[-6:])
+    await ingest_feed_memory_from_viewport(page, session)
+    status, style = await generate_status_post(
+        avoid_styles=session.recent_post_styles[-6:],
+        feed_memory_snippets=_recent_feed_memory_blob(session),
+    )
     if await create_feed_post(page, status):
         session.posts_this_session += 1
         session.recent_post_styles.append(style)

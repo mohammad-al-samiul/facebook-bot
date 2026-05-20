@@ -174,9 +174,13 @@ _COMMENT_SUBMIT_LABELS: tuple[str, ...] = (
 # first via a single fast selector before falling back to broader regex.
 _SHARE_BUTTON_LABELS: tuple[str, ...] = (
     "Share",
+    "Share post",
+    "Send",
     "Bagikan",           # id_ID
     "শেয়ার",
+    "শেয়ার করুন",
     "শেয়ার",             # bn variant
+    "শেয়ার করুন",
     "Delen",             # nl
     "Compartir",         # es
     "Partager",          # fr
@@ -188,12 +192,21 @@ _SHARE_BUTTON_LABELS: tuple[str, ...] = (
     "Compartilhar",      # pt
 )
 
-# Step 2 of share flow (after Share icon): open profile repost composer.
+# Step 2 of share flow (after Share icon): open profile/timeline repost composer.
 _SHARE_TO_PROFILE_LABELS: tuple[str, ...] = (
+    "Share to Facebook",
+    "Share on Facebook",
+    "Share to your Facebook",
+    "Share to facebook",
+    "Share to timeline",
+    "Share to Profile",
     "Share to profile",
     "Share to your profile",
     "Share on your profile",
-    "Share to Profile",
+    "ফেসবুকে শেয়ার",
+    "ফেসবুকে শেয়ার",
+    "ফেইসবুকে শেয়ার",
+    "নিজের টাইমলাইনে শেয়ার",
     "প্রোফাইলে শেয়ার",
     "প্রোফাইলে শেয়ার",
     "আপনার প্রোফাইলে শেয়ার",
@@ -224,9 +237,11 @@ _SHARE_COMPOSER_OPEN_LABELS: tuple[str, ...] = _SHARE_TO_PROFILE_LABELS + (
 _CLICK_SHARE_TO_PROFILE_JS: Final[str] = """
 () => {
   const keys = [
+    'share to facebook', 'share on facebook',
     'share to profile', 'share to your profile', 'share on your profile',
     'share to your timeline', 'share to news feed', 'share on your timeline',
-    'share to feed', 'share on facebook', 'share to facebook',
+    'share to feed',
+    'ফেসবুকে', 'ফেইসবুকে', 'নিজের টাইমলাইন',
     'প্রোফাইলে শেয়ার', 'প্রোফাইলে শেয়ার', 'ফিডে শেয়ার', 'ফিডে শেয়ার',
     'নিউজ ফিডে', 'আপনার প্রোফাইলে', 'bagikan ke profil', 'bagikan ke linimasa',
     'partager sur votre fil', 'compartir en tu biografía', 'auf deiner chronik',
@@ -291,15 +306,73 @@ _SHARE_TO_GROUP_LABELS: tuple[str, ...] = (
     "Condividi in un gruppo",
 )
 
-_SHARE_FINAL_POST_LABELS: tuple[str, ...] = (
+# Timeline/group repost confirm — exclude bare "Share" (opens story picker on m.facebook).
+_SHARE_TIMELINE_POST_LABELS: tuple[str, ...] = (
     "Post",
-    "Share",
     "পোস্ট",
     "পোস্ট করুন",
     "শেয়ার করুন",
+    "শেয়ার করুন",
     "Publish",
     "Done",
+    "Send",
+    "Submit",
 )
+
+_SHARE_FINAL_POST_LABELS: tuple[str, ...] = _SHARE_TIMELINE_POST_LABELS + ("Share",)
+
+_CLICK_SHARE_POST_JS: Final[str] = """
+() => {
+  const path = (location.pathname || '').toLowerCase();
+  if (path.includes('/stories') || path.includes('story.php')) return false;
+  const keys = [
+    'post', 'publish', 'done', 'send', 'submit',
+    'পোস্ট', 'পোস্ট করুন', 'শেয়ার করুন', 'শেয়ার করুন', 'প্রকাশ',
+    'bagikan', 'partager', 'compartir', 'condividi', 'teilen',
+  ];
+  const isPostLabel = (label) => {
+    const t = (label || '').toLowerCase().trim();
+    if (!t || t.length > 48) return false;
+    if (t === 'share') return false;
+    if (/cancel|back|close|বাতিল|পিছনে|comment|মন্তব্য/.test(t)) return false;
+    return keys.some((k) => t === k || t.startsWith(k + ' ') || t.endsWith(' ' + k));
+  };
+  const tryClick = (n) => {
+    if (!n) return false;
+    const disabled = n.getAttribute && n.getAttribute('aria-disabled');
+    if (disabled === 'true') return false;
+    const r = n.getBoundingClientRect();
+    if (r.width < 18 || r.height < 10 || r.top < 0) return false;
+    n.click();
+    return true;
+  };
+  const roots = [
+    ...document.querySelectorAll('[role="dialog"]'),
+    ...document.querySelectorAll('[data-mcomponent*="Sheet"], [data-mcomponent*="Composer"]'),
+    document.body,
+  ];
+  for (const root of roots) {
+    for (const n of root.querySelectorAll('[role="button"], button[type="submit"], button')) {
+      const label = (n.getAttribute('aria-label') || n.innerText || '').trim();
+      if (!isPostLabel(label)) continue;
+      if (tryClick(n)) return label.slice(0, 40);
+    }
+  }
+  for (const sel of [
+    '[data-mcomponent="MSubmitButton"]',
+    '[data-mcomponent*="SubmitButton"]',
+    '[aria-label="Post"][role="button"]',
+    '[aria-label="পোস্ট"][role="button"]',
+    '[aria-label="পোস্ট করুন"][role="button"]',
+    '[aria-label="শেয়ার করুন"][role="button"]',
+    '[aria-label="শেয়ার করুন"][role="button"]',
+  ]) {
+    const el = document.querySelector(sel);
+    if (tryClick(el)) return sel;
+  }
+  return false;
+}
+"""
 
 _SHARE_CAPTION_BOX_LABELS: tuple[str, ...] = (
     "Say something about this",
@@ -718,10 +791,21 @@ _CLOSE_STORY_JS: Final[str] = """
 _story_log = logging.getLogger("playwright_automation.actions.story")
 
 
+def _url_is_story_view(url: str) -> bool:
+    u = (url or "").lower()
+    return "/stories" in u or "story.php" in u
+
+
+async def _share_flow_blocked_by_story(page: Page) -> bool:
+    """True when timeline repost must abort (story/reel full-screen UI)."""
+    if _url_is_story_view(page.url or ""):
+        return True
+    return await story_view_is_open(page)
+
+
 async def story_view_is_open(page: Page) -> bool:
     """True when a full-screen Facebook Story overlay is visible."""
-    url = (page.url or "").lower()
-    if "/stories" in url or "story.php" in url:
+    if _url_is_story_view(page.url or ""):
         return True
     for lbl in _STORY_CLOSE_LABELS:
         try:
@@ -884,6 +968,12 @@ _STUCK_URL_FRAGMENTS: tuple[str, ...] = (
     "/sharer",
 )
 
+# FB internal Unity/timeline overlays after Share — not the newsfeed.
+_TRAP_URL_FRAGMENT_HINTS: tuple[str, ...] = (
+    "unity_",
+    "timelinescreen",
+)
+
 
 async def page_looks_stuck(page: Page) -> bool:
     """True when we are on a modal page or overlay instead of the scrollable feed."""
@@ -891,6 +981,8 @@ async def page_looks_stuck(page: Page) -> bool:
     if _is_blank_or_broken_url(url):
         return True
     low = url.lower()
+    if any(h in low for h in _TRAP_URL_FRAGMENT_HINTS):
+        return True
     if any(frag in low for frag in _STUCK_URL_FRAGMENTS):
         return True
     if await story_view_is_open(page):
@@ -1475,40 +1567,83 @@ _CLICK_COMMENT_JS: Final[str] = """
 _CLICK_SHARE_JS: Final[str] = """
 (el) => {
   const root = el.closest('[role="article"]') || el.closest('[data-pe-post]') || el;
-  const nodes = root.querySelectorAll(
-    '[role="button"], [role="link"], a[role="link"], span[tabindex="0"]'
-  );
   const shareKeys = [
-    'share', 'শেয়ার', 'শেয়ার', 'bagikan', 'teilen', 'partager', 'compartir',
-    'condividi', 'udostępnij', 'แชร์', 'シェア', 'compartilhar', 'delen',
+    'share', 'শেয়ার', 'শেয়ার', 'শেয়ার করুন', 'শেয়ার করুন',
+    'bagikan', 'teilen', 'partager', 'compartir', 'condividi', 'udostępnij',
+    'แชร์', 'シェア', 'compartilhar', 'delen', 'send this',
   ];
-  const moreKeys = ['more', 'আরও', 'more options', 'see more', 'meer', 'plus'];
+  const moreKeys = [
+    'more', 'আরও', 'more options', 'see more options', 'see more', 'meer', 'plus',
+  ];
   const badHref = (n) => {
     const href = ((n.getAttribute && n.getAttribute('href')) || n.href || '').toLowerCase();
-    return href.includes('story.php') || href.includes('/reel/') || href.includes('/reels/');
+    return href.includes('story.php') || href.includes('/reel/') || href.includes('/reels/')
+      || href.includes('/stories/');
   };
-  const pick = (keys) => {
-    for (const n of nodes) {
-      if (n.tagName === 'A' && badHref(n)) continue;
-      const label = ((n.getAttribute('aria-label') || n.innerText || '') + '').toLowerCase();
-      if (!keys.some((k) => label.includes(k))) continue;
-      if (n.getAttribute('role') === 'button' || n.tagName === 'BUTTON') {
-        n.click();
-        return true;
-      }
-    }
-    for (const n of nodes) {
-      if (n.tagName === 'A' && badHref(n)) continue;
-      const label = ((n.getAttribute('aria-label') || n.innerText || '') + '').toLowerCase();
-      if (keys.some((k) => label.includes(k))) {
+  const labelOf = (n) => (
+    (n.getAttribute('aria-label') || n.innerText || n.title || '') + ''
+  ).toLowerCase().trim();
+  const visible = (n) => {
+    const r = n.getBoundingClientRect();
+    return r.width >= 16 && r.height >= 14 && r.top >= -8 && r.bottom <= window.innerHeight + 80;
+  };
+  const all = Array.from(root.querySelectorAll(
+    '[role="button"], [role="link"], a[role="link"], span[tabindex="0"], div[tabindex="0"]'
+  )).filter(visible);
+  const rootRect = root.getBoundingClientRect();
+  const actionBar = all.filter((n) => {
+    const r = n.getBoundingClientRect();
+    return r.top >= rootRect.top + Math.min(rootRect.height * 0.25, 200);
+  });
+  const order = actionBar.length >= 2 ? actionBar : all;
+  const pick = (nodes, keys, buttonsFirst) => {
+    const pass = buttonsFirst
+      ? [nodes.filter((n) => n.getAttribute('role') === 'button' || n.tagName === 'BUTTON'), nodes]
+      : [nodes];
+    for (const list of pass) {
+      for (const n of list) {
+        if (n.tagName === 'A' && badHref(n)) continue;
+        const label = labelOf(n);
+        if (/^(like|comment|লাইক|মন্তব্য)\\b/.test(label)) continue;
+        if (!keys.some((k) => label.includes(k))) continue;
         n.click();
         return true;
       }
     }
     return false;
   };
-  if (pick(shareKeys)) return 'share';
-  if (pick(moreKeys)) return 'more';
+  if (pick(order, shareKeys, true)) return 'share';
+  if (pick(order, moreKeys, true)) return 'more';
+  if (pick(all, shareKeys, false)) return 'share';
+  if (pick(all, moreKeys, false)) return 'more';
+  return false;
+}
+"""
+
+_CLICK_SHARE_AFTER_MORE_JS: Final[str] = """
+(el) => {
+  const shareKeys = [
+    'share', 'শেয়ার', 'শেয়ার', 'শেয়ার করুন', 'bagikan', 'partager', 'compartir', 'teilen',
+  ];
+  const labelOf = (n) => (
+    (n.getAttribute('aria-label') || n.innerText || '') + ''
+  ).toLowerCase();
+  const root = el.closest('[data-pe-post]') || el.closest('[role="article"]') || el;
+  const scopes = [
+    ...root.querySelectorAll('[role="menu"], [role="listbox"]'),
+    document.body,
+  ];
+  for (const scope of scopes) {
+    for (const n of scope.querySelectorAll('[role="menuitem"], [role="button"], [role="link"]')) {
+      const r = n.getBoundingClientRect();
+      if (r.width < 12 || r.height < 10) continue;
+      const label = labelOf(n);
+      if (shareKeys.some((k) => label.includes(k))) {
+        n.click();
+        return 'menu-share';
+      }
+    }
+  }
   return false;
 }
 """
@@ -1517,6 +1652,51 @@ _OPEN_SHARE_WRITE_SOMETHING_JS: Final[str] = """
 () => {
   const skipRe = /what'?s on your mind|create a post|আপনার মনে কী|create post/i;
   const wantRe = /write something|say something|share something|share your thoughts|এই সম্পর্কে|কিছু লিখুন|tulis sesuatu|schreib|écrivez|add to your post/i;
+
+  // Web / Touch (m.facebook.com share composer): caption is often a plain <textarea>.
+  const preferTa = Array.from(document.querySelectorAll(
+    'textarea.textbox[maxlength="2000"], textarea[role="combobox"].textbox, textarea.textbox[role="combobox"], textarea.textbox'
+  ));
+  for (const el of preferTa) {
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden' ||
+        Number.parseFloat(cs.opacity || '1') < 0.05) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 6 || r.height < 6) continue;
+    if (r.bottom < 0 || r.top > window.innerHeight) continue;
+    try {
+      el.focus();
+      el.click();
+      return 'textarea.textbox';
+    } catch (_e) {}
+  }
+
+  // m.facebook share composer: caption row is often a *button* styled as TextArea
+  // (not ServerTextArea). Inner text can be truncated HTML + "See more".
+  const mCaptionStubs = document.querySelectorAll(
+    '[data-mcomponent="TextArea"][role="button"][data-type="text"], '
+    + '[data-mcomponent="TextArea"][role="button"]'
+  );
+  for (const el of mCaptionStubs) {
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 140 || r.height < 42 || r.top < 60) continue;
+    const txt = (el.innerText || el.textContent || '').trim();
+    if (skipRe.test(txt)) continue;
+    const low = txt.toLowerCase();
+    const looksShareHint = wantRe.test(txt) ||
+      /see more/.test(low) ||
+      (/</.test(txt) && /role=.?button/.test(low) && /see more/.test(low));
+    const wideEnough = r.width >= 280 && r.height <= 140;
+    const wideCaptionRow = wideEnough && (/see more/.test(low) || /</.test(txt));
+    if (!looksShareHint && !wideCaptionRow) continue;
+    try {
+      el.focus();
+      el.click();
+      return 'MTextArea-stub';
+    } catch (_e) {}
+  }
 
   // Mobile share sheet: clickable placeholder (not contenteditable until tapped).
   const serverAreas = document.querySelectorAll('[data-mcomponent="ServerTextArea"]');
@@ -1953,6 +2133,43 @@ async def resume_feed_after_comment(
         logger_.info("Feed scroll after comment (%d segment(s))", segs)
     except Exception as exc:
         logger_.debug("Feed scroll after comment failed: %s", exc)
+    await random_delay(0.6, 1.4)
+
+
+async def resume_feed_after_share(
+    page: Page,
+    *,
+    log: logging.Logger | None = None,
+    scroll_segments: int | None = None,
+) -> None:
+    """
+    After Share-to-timeline completes, return to the scrollable home feed.
+
+    Do **not** run the comment-composer exit path (wrong surface; causes bogus
+    Back clicks and leaves Unity/timeline profile stubs).
+    """
+    logger_ = log or _share_log
+    await recover_until_feed(
+        page,
+        log=logger_,
+        max_steps=6,
+        reason="after share",
+    )
+    low = (page.url or "").lower()
+    if "/friends" in low or "/notifications" in low or any(h in low for h in _TRAP_URL_FRAGMENT_HINTS):
+        await return_to_feed(page, log=logger_)
+    try:
+        await click_feed_tab(page, log=logger_)
+        await random_delay(0.35, 0.7)
+    except Exception as exc:
+        logger_.debug("Feed tab after share: %s", exc)
+
+    segs = scroll_segments if scroll_segments is not None else random.randint(2, 5)
+    try:
+        await human_scroll(page, segments=segs)
+        logger_.info("Feed scroll after share (%d segment(s))", segs)
+    except Exception as exc:
+        logger_.debug("Feed scroll after share failed: %s", exc)
     await random_delay(0.6, 1.4)
 
 
@@ -2533,115 +2750,256 @@ def _default_share_trigger(post_element: Locator) -> Locator:
     return _multilingual_button(post_element, _SHARE_BUTTON_LABELS)
 
 
-async def _open_share_sheet(page: Page, post_element: Locator | str) -> bool:
-    post = _resolve_locator(page, post_element)
+async def _refresh_share_post_locator(page: Page, post: Locator) -> Locator:
+    """Re-resolve ``data-pe-post`` anchor after scroll/DOM refresh."""
     try:
-        await post.scroll_into_view_if_needed()
+        tag = await post.get_attribute("data-pe-post", timeout=1_500)
+        if tag:
+            fresh = page.locator(f'[data-pe-post="{tag}"]').first
+            if await fresh.count() > 0:
+                return fresh
     except Exception:
         pass
-    await random_delay(0.35, 0.85)
+    return post
 
-    try:
-        handle = await post.element_handle(timeout=2_500)
-        if handle is not None:
-            clicked = await handle.evaluate(_CLICK_SHARE_JS)
-            if clicked == "share":
-                _share_log.info("Step 1/4: Share icon clicked (post)")
-                await random_delay(0.8, 1.5)
-                if await story_view_is_open(page):
-                    _share_log.warning(
-                        "Share opened story viewer — skipping reel/story post"
-                    )
-                    await dismiss_story_view(page, log=_share_log)
-                    return False
-                return True
-            if clicked == "more":
-                await random_delay(0.6, 1.1)
-                for lbl in _SHARE_BUTTON_LABELS:
-                    item = page.get_by_role("button", name=re.compile(re.escape(lbl), re.I)).first
-                    try:
-                        if await item.is_visible(timeout=1_200):
-                            await item.click(timeout=3_000)
-                            await random_delay(0.8, 1.5)
-                            return True
-                    except Exception:
-                        continue
-                    loc = page.locator(f'[aria-label="{lbl}"]').first
-                    try:
-                        if await loc.is_visible(timeout=900):
-                            await loc.click(timeout=3_000)
-                            await random_delay(0.8, 1.5)
-                            return True
-                    except Exception:
-                        continue
-    except Exception as exc:
-        _share_log.debug("JS share open failed: %s", exc)
 
-    trigger = _default_share_trigger(post)
+async def _click_share_near_post_bbox(page: Page, post: Locator) -> bool:
+    """Pick a visible page-wide Share control overlapping the post's horizontal band."""
     try:
-        if await trigger.is_visible(timeout=2_500):
-            try:
-                await asyncio.wait_for(human_click(page, trigger), timeout=6.0)
-            except Exception:
-                await trigger.click(timeout=3_000)
-            _share_log.info("Step 1/4: Share icon clicked (trigger)")
-            await random_delay(0.8, 1.5)
-            if await story_view_is_open(page):
-                _share_log.warning(
-                    "Share opened story viewer — skipping reel/story post"
-                )
-                await dismiss_story_view(page, log=_share_log)
-                return False
-            return True
+        post_box = await post.bounding_box()
     except Exception:
-        pass
-
-    for sel in (
-        '[aria-label*="Share" i][role="button"]',
-        '[aria-label*="শেয়ার" i][role="button"]',
-        '[aria-label*="শেয়ার" i][role="button"]',
-        '[aria-label*="Bagikan" i][role="button"]',
-    ):
-        loc = post.locator(sel).first
+        post_box = None
+    if not post_box:
+        return False
+    py0 = post_box["y"] - 40
+    py1 = post_box["y"] + post_box["height"] + 120
+    px0 = post_box["x"] - 30
+    px1 = post_box["x"] + post_box["width"] + 30
+    name_re = _build_label_pattern(_SHARE_BUTTON_LABELS)
+    candidates = page.get_by_role("button", name=name_re)
+    try:
+        total = await candidates.count()
+    except Exception:
+        total = 0
+    best_idx = -1
+    best_score = -1.0
+    for i in range(min(total, 24)):
+        btn = candidates.nth(i)
         try:
-            if await loc.is_visible(timeout=1_200):
-                await loc.click(timeout=3_000)
-                _share_log.info("Step 1/4: Share icon clicked (selector)")
-                await random_delay(0.8, 1.5)
-                if await story_view_is_open(page):
-                    _share_log.warning(
-                        "Share opened story viewer — skipping reel/story post"
-                    )
-                    await dismiss_story_view(page, log=_share_log)
-                    return False
+            if not await btn.is_visible(timeout=400):
+                continue
+            box = await btn.bounding_box()
+        except Exception:
+            continue
+        if not box:
+            continue
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
+        if cy < py0 or cy > py1 or cx < px0 or cx > px1:
+            continue
+        score = box["y"]
+        if score > best_score:
+            best_score = score
+            best_idx = i
+    if best_idx < 0:
+        return False
+    try:
+        await candidates.nth(best_idx).click(timeout=4_000)
+        _share_log.info("Step 1/4: Share icon clicked (bbox overlap)")
+        await random_delay(0.8, 1.5)
+        return True
+    except Exception:
+        return False
+
+
+async def _share_sheet_opened(page: Page) -> bool:
+    """True when share sheet or repost composer is already visible."""
+    if await _share_composer_ready(page):
+        return True
+    for lbl in _SHARE_TO_PROFILE_LABELS[:6]:
+        try:
+            btn = page.get_by_role("button", name=re.compile(re.escape(lbl), re.I)).first
+            if await btn.is_visible(timeout=450):
                 return True
         except Exception:
             continue
+    return False
+
+
+async def _open_share_sheet(page: Page, post_element: Locator | str) -> bool:
+    post = _resolve_locator(page, post_element)
+    post = await _refresh_share_post_locator(page, post)
+
+    async def _after_share_click() -> bool:
+        await random_delay(0.8, 1.5)
+        if await _share_flow_blocked_by_story(page):
+            _share_log.warning(
+                "Share opened story viewer — skipping reel/story post"
+            )
+            await dismiss_story_view(page, log=_share_log)
+            return False
+        return await _share_sheet_opened(page) or True
+
+    for attempt in range(1, 4):
+        if attempt > 1:
+            post = await _refresh_share_post_locator(page, post)
+            try:
+                await post.scroll_into_view_if_needed()
+            except Exception:
+                pass
+            await random_delay(0.45, 0.9)
+
+        try:
+            handle = await post.element_handle(timeout=2_500)
+            if handle is not None:
+                clicked = await handle.evaluate(_CLICK_SHARE_JS)
+                if clicked == "share":
+                    _share_log.info("Step 1/4: Share icon clicked (post, try %d)", attempt)
+                    return await _after_share_click()
+                if clicked == "more":
+                    await random_delay(0.55, 1.0)
+                    menu_pick = await handle.evaluate(_CLICK_SHARE_AFTER_MORE_JS)
+                    if menu_pick:
+                        _share_log.info("Step 1/4: Share from More menu (post, try %d)", attempt)
+                        return await _after_share_click()
+                    for lbl in _SHARE_BUTTON_LABELS:
+                        item = post.get_by_role(
+                            "button", name=re.compile(re.escape(lbl), re.I)
+                        ).first
+                        try:
+                            if await item.is_visible(timeout=900):
+                                await item.click(timeout=3_000)
+                                _share_log.info(
+                                    "Step 1/4: Share from More (scoped, try %d)", attempt
+                                )
+                                return await _after_share_click()
+                        except Exception:
+                            continue
+        except Exception as exc:
+            _share_log.debug("JS share open failed (try %d): %s", attempt, exc)
+
+        trigger = _default_share_trigger(post)
+        try:
+            if await trigger.is_visible(timeout=2_000):
+                try:
+                    await asyncio.wait_for(human_click(page, trigger), timeout=6.0)
+                except Exception:
+                    await trigger.click(timeout=3_000)
+                _share_log.info("Step 1/4: Share icon clicked (trigger, try %d)", attempt)
+                return await _after_share_click()
+        except Exception:
+            pass
+
+        for sel in (
+            '[aria-label*="Share" i][role="button"]',
+            '[aria-label*="শেয়ার" i][role="button"]',
+            '[aria-label*="শেয়ার" i][role="button"]',
+            '[aria-label*="Bagikan" i][role="button"]',
+            '[aria-label*="শেয়ার করুন" i][role="button"]',
+        ):
+            loc = post.locator(sel).first
+            try:
+                if await loc.is_visible(timeout=1_000):
+                    await loc.click(timeout=3_000)
+                    _share_log.info("Step 1/4: Share icon clicked (selector, try %d)", attempt)
+                    return await _after_share_click()
+            except Exception:
+                continue
+
+        # Like/Comment row: Share is often the 3rd action icon (no readable label).
+        try:
+            like_row = post.locator('[aria-label*="Like" i][role="button"]').first
+            if await like_row.is_visible(timeout=900):
+                row = like_row.locator("xpath=ancestor::*[.//*[@role='button']][1]")
+                icons = row.locator('[role="button"]')
+                cnt = await icons.count()
+                if cnt >= 3:
+                    await icons.nth(cnt - 1).click(timeout=3_000)
+                    _share_log.info(
+                        "Step 1/4: Share icon clicked (action row #%d, try %d)",
+                        cnt - 1,
+                        attempt,
+                    )
+                    return await _after_share_click()
+        except Exception as exc:
+            _share_log.debug("Action-row share click failed: %s", exc)
+
+        if await _click_share_near_post_bbox(page, post):
+            return await _after_share_click()
 
     _share_log.warning("Share button not visible on post")
     return False
 
 
 async def _share_composer_ready(page: Page) -> bool:
-    """True when the repost caption box is already open (skips sheet step 2)."""
+    """True when the repost caption field exists (after Share to profile)."""
     if await _locate_share_caption_input(page):
         return True
-    return await _open_share_write_something(page)
+    try:
+        mstub = page.locator(
+            '[data-mcomponent="TextArea"][role="button"][data-type="text"]'
+        ).first
+        if await mstub.is_visible(timeout=900):
+            return True
+    except Exception:
+        pass
+    try:
+        ta = page.locator('textarea.textbox').first
+        if await ta.is_visible(timeout=800):
+            return True
+    except Exception:
+        pass
+    try:
+        sta = page.locator('[data-mcomponent="ServerTextArea"]').first
+        if await sta.is_visible(timeout=800):
+            t = (await sta.inner_text(timeout=500) or "").lower()
+            if re.search(r"write something|say something|কিছু লিখুন|এই সম্পর্কে", t, re.I):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _after_share_destination_click(page: Page) -> bool:
+    """Return False when step-2 navigation landed on story viewer instead of composer."""
+    if not await _share_flow_blocked_by_story(page):
+        return True
+    _share_log.warning("Share destination opened story viewer — aborting")
+    await dismiss_story_view(page, log=_share_log)
+    return False
 
 
 async def _click_share_to_profile(page: Page) -> bool:
     """Step 2: choose **Share to profile** / timeline on the share sheet."""
     await random_delay(0.5, 1.0)
 
-    if await _share_composer_ready(page):
-        _share_log.info("Step 2/4: Share composer ready (caption / Write something)")
-        return True
+    if await _share_flow_blocked_by_story(page):
+        _share_log.warning("Share aborted — story viewer before destination pick")
+        await dismiss_story_view(page, log=_share_log)
+        return False
 
     timeline_labels = tuple(
         dict.fromkeys(_SHARE_TO_PROFILE_LABELS + _SHARE_COMPOSER_OPEN_LABELS)
     )
 
     for attempt in range(1, 4):
+        fb_btn = page.get_by_role(
+            "button",
+            name=re.compile(
+                r"share\s+(to|on)\s+facebook|ফেসবুক|ফেইসবুক",
+                re.I,
+            ),
+        ).first
+        try:
+            if await fb_btn.is_visible(timeout=900):
+                await asyncio.wait_for(human_click(page, fb_btn), timeout=6.0)
+                _share_log.info("Step 2/4: Share to Facebook (role=button, try %d)", attempt)
+                await random_delay(0.7, 1.3)
+                if await _after_share_destination_click(page):
+                    return True
+        except Exception:
+            pass
+
         btn = page.get_by_role(
             "button",
             name=re.compile(
@@ -2654,29 +3012,30 @@ async def _click_share_to_profile(page: Page) -> bool:
                 await asyncio.wait_for(human_click(page, btn), timeout=6.0)
                 _share_log.info("Step 2/4: Share destination (role=button, try %d)", attempt)
                 await random_delay(0.7, 1.3)
-                return True
+                if await _after_share_destination_click(page):
+                    return True
         except Exception:
             pass
 
         if await _click_first_visible_label(page, _SHARE_TO_PROFILE_LABELS):
             _share_log.info("Step 2/4: Share to profile (label, try %d)", attempt)
-            return True
+            if await _after_share_destination_click(page):
+                return True
 
         if await _click_first_visible_label(page, timeline_labels):
             _share_log.info("Step 2/4: Share to timeline/feed (label, try %d)", attempt)
-            return True
+            if await _after_share_destination_click(page):
+                return True
 
         try:
             picked = await page.evaluate(_CLICK_SHARE_TO_PROFILE_JS)
             if picked:
                 _share_log.info("Step 2/4: Share destination (JS %r, try %d)", picked, attempt)
                 await random_delay(0.7, 1.3)
-                return True
+                if await _after_share_destination_click(page):
+                    return True
         except Exception as exc:
             _share_log.debug("Share to profile JS failed: %s", exc)
-
-        if await _share_composer_ready(page):
-            return True
 
         try:
             await page.evaluate(_SCROLL_SHARE_SHEET_JS)
@@ -2684,6 +3043,9 @@ async def _click_share_to_profile(page: Page) -> bool:
             pass
         await random_delay(0.5, 0.9)
 
+    if await _share_composer_ready(page):
+        _share_log.info("Step 2/4: Share composer ready (caption / Write something)")
+        return True
     return False
 
 
@@ -2708,22 +3070,111 @@ async def _click_first_visible_label(page: Page, labels: tuple[str, ...]) -> boo
     return False
 
 
+async def _click_share_post_button(page: Page) -> bool:
+    """
+    Tap **Post** / **Share** on the repost composer (mobile + desktop).
+    """
+    for sel in (
+        '[data-mcomponent="MSubmitButton"]',
+        '[data-mcomponent*="SubmitButton"]',
+        '[aria-label="Post"][role="button"]',
+        '[aria-label="পোস্ট"][role="button"]',
+        '[aria-label="পোস্ট করুন"][role="button"]',
+        '[aria-label="শেয়ার করুন"][role="button"]',
+        '[aria-label="শেয়ার করুন"][role="button"]',
+    ):
+        loc = page.locator(sel).first
+        try:
+            if await loc.is_visible(timeout=1_000):
+                disabled = await loc.get_attribute("aria-disabled")
+                if disabled and disabled.lower() == "true":
+                    await random_delay(0.4, 0.8)
+                await asyncio.wait_for(human_click(page, loc), timeout=6.0)
+                _share_log.info("Step 4/4: Post via selector %r", sel)
+                await random_delay(0.8, 1.4)
+                return True
+        except Exception:
+            continue
+
+    for lbl in _SHARE_TIMELINE_POST_LABELS:
+        btn = page.get_by_role("button", name=re.compile(rf"^\s*{re.escape(lbl)}\s*$", re.I)).first
+        try:
+            if await btn.is_visible(timeout=1_000):
+                await asyncio.wait_for(human_click(page, btn), timeout=6.0)
+                _share_log.info("Step 4/4: Post via role button %r", lbl)
+                await random_delay(0.8, 1.4)
+                return True
+        except Exception:
+            continue
+
+    try:
+        picked = await page.evaluate(_CLICK_SHARE_POST_JS)
+        if picked:
+            _share_log.info("Step 4/4: Post via JS (%r)", picked)
+            await random_delay(0.8, 1.4)
+            return True
+    except Exception as exc:
+        _share_log.debug("Share Post JS failed: %s", exc)
+
+    return False
+
+
+async def _verify_timeline_share_completed(page: Page) -> bool:
+    """Confirm repost left the composer and did not land on story viewer."""
+    await random_delay(1.0, 2.0)
+    if await _share_flow_blocked_by_story(page):
+        return False
+    if await _share_composer_ready(page):
+        return False
+    return True
+
+
+async def _finalize_timeline_share(page: Page, ok: bool) -> bool:
+    """Reject false positives where the flow ends on story viewer."""
+    if not ok:
+        return False
+    if await _share_flow_blocked_by_story(page):
+        _share_log.warning(
+            "Share looked successful but story viewer still open — failed"
+        )
+        await dismiss_story_view(page, log=_share_log)
+        return False
+    return True
+
+
 async def _confirm_share_submit(page: Page, *, allow_instant: bool = True) -> bool:
     await human_review_pause(min_sec=0.7, max_sec=2.0)
     if allow_instant and await _click_first_visible_label(page, _SHARE_INSTANT_ONLY_LABELS):
         _share_log.info("Shared via instant Share now")
         return True
-    if await _click_first_visible_label(page, _SHARE_FINAL_POST_LABELS):
-        _share_log.info("Shared via Post/Share confirm")
-        return True
-    try:
-        role_post = page.get_by_role("button", name=re.compile(r"^post$", re.I)).first
-        if await role_post.is_visible(timeout=1500):
-            await role_post.click(timeout=3_000)
-            await random_delay(0.5, 1.0)
+
+    submit_labels = (
+        _SHARE_FINAL_POST_LABELS if allow_instant else _SHARE_TIMELINE_POST_LABELS
+    )
+
+    for _ in range(6):
+        if await _share_flow_blocked_by_story(page):
+            _share_log.warning("Share submit blocked — story viewer open")
+            return False
+        if await _click_share_post_button(page):
+            await random_delay(0.8, 1.4)
+            if allow_instant:
+                _share_log.info("Shared via Post/Share confirm")
+                return True
+            if await _verify_timeline_share_completed(page):
+                _share_log.info("Shared via Post confirm")
+                return True
+        await random_delay(0.45, 0.85)
+
+    if await _click_first_visible_label(page, submit_labels):
+        await random_delay(0.8, 1.4)
+        if allow_instant:
+            _share_log.info("Shared via Post/Share label fallback")
             return True
-    except Exception:
-        pass
+        if await _verify_timeline_share_completed(page):
+            _share_log.info("Shared via Post label fallback")
+            return True
+        _share_log.warning("Post label clicked but composer/story still open")
     return False
 
 
@@ -2790,15 +3241,49 @@ _CAPTION_TYPED_VERIFY_JS: Final[str] = """
 () => {
   const placeholder = /write something|say something|what'?s on your mind|কিছু লিখুন|এই সম্পর্কে কিছু/i;
   const nodes = document.querySelectorAll(
-    '[contenteditable="true"], [data-mcomponent="ServerTextArea"], textarea'
+    'textarea.textbox[maxlength="2000"], textarea.textbox[role="combobox"], textarea.textbox, ' +
+      '[contenteditable="true"], [data-mcomponent="ServerTextArea"], textarea'
   );
   for (const el of nodes) {
-    const t = (el.innerText || el.textContent || '').trim();
-    if (t.length < 3) continue;
-    if (placeholder.test(t)) continue;
-    return t.slice(0, 80);
+    const raw = (
+      el.tagName === 'TEXTAREA'
+        ? (el.value ?? '')
+        : (el.innerText || el.textContent || '')
+    ).trim();
+    if (raw.length < 3) continue;
+    if (placeholder.test(raw)) continue;
+    return raw.slice(0, 80);
   }
   return false;
+}
+"""
+
+_FOCUS_SHARE_TEXTAREA_JS: Final[str] = """
+() => {
+  const inDialog = (el) => !!(el && el.closest('[role="dialog"], [aria-modal="true"]'));
+  const score = (el) => {
+    let s = inDialog(el) ? 4 : 0;
+    if ((el.className || '').toString().includes('textbox')) s += 3;
+    const m = Number.parseInt(el.getAttribute('maxlength') || '', 10);
+    if (m >= 400) s += 2;
+    const r = el.getBoundingClientRect();
+    return s * 1000 + Math.floor(r.height);
+  };
+  const textareas = Array.from(document.querySelectorAll('textarea')).filter((el) => {
+    if (el.disabled || el.readOnly) return false;
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 96 && r.height > 14 && r.top >= 40 && r.bottom <= window.innerHeight + 120;
+  });
+  textareas.sort((a, b) => score(b) - score(a));
+  const ta = textareas[0];
+  if (!ta) return false;
+  ta.focus({ preventScroll: false });
+  try {
+    ta.click();
+  } catch (_e) {}
+  return true;
 }
 """
 
@@ -2852,9 +3337,105 @@ async def _share_caption_appears_typed(page: Page) -> bool:
         return False
 
 
+_FEED_COMPOSER_INNER_SKIP: Final[re.Pattern[str]] = re.compile(
+    r"what'?s on your mind|আপনার মনে কী|^create\s+a?\s*post\b|পোস্ট তৈরি",
+    re.I,
+)
+
+
+async def _click_share_mtextarea_placeholder(page: Page) -> bool:
+    """
+    Newer m.facebook share flow: caption hint is ``data-mcomponent="TextArea"``
+    ``role="button"`` — inner text may be escaped HTML snippets + "See more", not "Write something".
+    """
+    selectors: tuple[str, ...] = (
+        'div[data-mcomponent="TextArea"][role="button"][data-type="text"]',
+        '[data-mcomponent="TextArea"][role="button"][data-type="text"]',
+        'div[data-mcomponent="TextArea"][role="button"]',
+        '[data-mcomponent="TextArea"][role="button"]',
+    )
+    hint_re = re.compile(
+        r"write\s+something|say\s+something|share\s+your\s+thoughts|এই সম্পর্কে|কিছু লিখুন|see\s+more",
+        re.I,
+    )
+    for css in selectors:
+        loc = page.locator(css)
+        try:
+            count = await loc.count()
+        except Exception:
+            count = 0
+        for idx in range(min(count, 12) - 1, -1, -1):
+            el = loc.nth(idx)
+            try:
+                if not await el.is_visible(timeout=500):
+                    continue
+            except Exception:
+                continue
+            try:
+                box = await el.bounding_box()
+            except Exception:
+                box = None
+            try:
+                raw = ((await el.inner_text(timeout=800)) or "").strip()
+            except Exception:
+                raw = ""
+            if _FEED_COMPOSER_INNER_SKIP.search(raw):
+                continue
+            low = raw.lower()
+            if hint_re.search(raw) or "see more" in low:
+                try:
+                    await asyncio.wait_for(human_click(page, el), timeout=6.0)
+                except Exception:
+                    await el.click(timeout=4_000)
+                _share_log.info("Step 3/4: Share caption — tapped M TextArea stub (%s)", css[:40])
+                # Real <textarea> often mounts React-side after stub tap — wait longer.
+                await random_delay(1.05, 2.15)
+                return True
+            if (
+                box
+                and box.get("width", 0) >= 260
+                and 48 <= box.get("height", 0) <= 130
+                and len(raw) >= 8
+                and ("see more" in low or "<" in raw)
+            ):
+                try:
+                    await asyncio.wait_for(human_click(page, el), timeout=6.0)
+                except Exception:
+                    await el.click(timeout=4_000)
+                _share_log.info("Step 3/4: Share caption — tapped wide M TextArea row (heuristic)")
+                await random_delay(1.05, 2.15)
+                return True
+    return False
+
+
 async def _open_share_write_something(page: Page) -> bool:
     """Tap the mobile share placeholder (``ServerTextArea`` / ``Write something``)."""
+    if await _click_share_mtextarea_placeholder(page):
+        return True
+
+    for css in (
+        'textarea.textbox[maxlength="2000"]',
+        'textarea.textbox[role="combobox"]',
+        'textarea.textbox',
+    ):
+        loc = page.locator(css).first
+        try:
+            if await loc.is_visible(timeout=1_000):
+                try:
+                    await loc.focus(timeout=3_000)
+                except Exception:
+                    pass
+                await loc.click(timeout=4_000)
+                _share_log.info("Step 3/4: Share caption — focused textarea (%s)", css)
+                await random_delay(0.35, 0.75)
+                return True
+        except Exception:
+            continue
+
     for loc in (
+        page.locator('[data-mcomponent="TextArea"][role="button"]').filter(
+            has_text=re.compile(r"see\s+more|write\s+something|say\s+something|লিখুন", re.I)
+        ).first,
         page.locator('[data-mcomponent="ServerTextArea"]').first,
         page.locator('[data-mcomponent="ServerTextArea"]').filter(
             has_text=re.compile(r"write something|say something|কিছু লিখুন|এই সম্পর্কে", re.I)
@@ -2876,7 +3457,10 @@ async def _open_share_write_something(page: Page) -> bool:
         opened = await page.evaluate(_OPEN_SHARE_WRITE_SOMETHING_JS)
         if opened:
             _share_log.info("Opened share caption via JS (%s)", opened)
-            await random_delay(0.4, 0.8)
+            if str(opened).startswith("MTextArea"):
+                await random_delay(1.1, 2.05)
+            else:
+                await random_delay(0.4, 0.85)
             return True
     except Exception as exc:
         _share_log.debug("JS open share write-something failed: %s", exc)
@@ -2891,6 +3475,50 @@ async def _locate_share_caption_input(page: Page) -> Locator | None:
     )
 
     for _ in range(5):
+        # Real field often lives under the share dialog (after M-stub opens).
+        for sel in (
+            '[role="dialog"] textarea:not([readonly]):not([disabled])',
+            '[aria-modal="true"] textarea:not([readonly]):not([disabled])',
+        ):
+            loc = page.locator(sel)
+            try:
+                n = await loc.count()
+            except Exception:
+                n = 0
+            for i in range(min(n, 8) - 1, -1, -1):
+                cand = loc.nth(i)
+                try:
+                    if not await cand.is_visible(timeout=550):
+                        continue
+                except Exception:
+                    continue
+                return cand
+
+        for css in (
+            'textarea.textbox[maxlength="2000"]',
+            'textarea.textbox[role="combobox"]',
+            'textarea.textbox',
+        ):
+            loc = page.locator(css)
+            try:
+                n = await loc.count()
+            except Exception:
+                n = 0
+            for i in range(min(n, 14) - 1, -1, -1):
+                cand = loc.nth(i)
+                try:
+                    if not await cand.is_visible(timeout=450):
+                        continue
+                except Exception:
+                    continue
+                try:
+                    al = (await cand.get_attribute("aria-label")) or ""
+                    if feed_composer_skip.search(al):
+                        continue
+                except Exception:
+                    pass
+                return cand
+
         for lbl in _SHARE_CAPTION_BOX_LABELS:
             for cand in (
                 page.locator(f'[aria-label="{lbl}"][contenteditable="true"]'),
@@ -2930,32 +3558,102 @@ async def _locate_share_caption_input(page: Page) -> Locator | None:
 
 async def _type_share_caption(page: Page, box: Locator | None, body: str) -> bool:
     """Focus the caption field and type ``body`` character by character."""
-    if box is not None:
-        try:
-            await asyncio.wait_for(human_click(page, box), timeout=6.0)
-        except Exception:
-            try:
-                await box.click(timeout=3_000)
-            except Exception:
-                box = None
-    await random_delay(0.2, 0.45)
+    text = (body or "").strip()[:300]
+    if not text:
+        return False
 
     if box is not None:
+        try:
+            await box.scroll_into_view_if_needed(timeout=2_500)
+        except Exception:
+            pass
+        for attempt in range(1, 4):
+            try:
+                await asyncio.wait_for(human_click(page, box), timeout=6.0)
+            except Exception:
+                try:
+                    await box.click(timeout=3_500, force=(attempt >= 2))
+                except Exception:
+                    pass
+            await random_delay(0.12, 0.38)
+
+            tag = ""
+            try:
+                tag = (await box.evaluate("e => (e && e.tagName ? e.tagName : '').toLowerCase()")).strip()
+            except Exception:
+                tag = ""
+
+            if tag in ("textarea", "input"):
+                try:
+                    await box.fill("")
+                    await random_delay(0.06, 0.16)
+                    await box.fill(text)
+                    await human_review_pause(min_sec=0.45, max_sec=1.3)
+                    if await _share_caption_appears_typed(page):
+                        _share_log.info("Typed share caption via fill (%d chars): %r", len(text), text[:70])
+                        await random_delay(0.35, 0.75)
+                        return True
+                except Exception as exc:
+                    _share_log.debug("Share caption fill failed (try %d): %s", attempt, exc)
+
+                try:
+                    await box.focus(timeout=3_500)
+                    try:
+                        await page.keyboard.press("Control+A")
+                        await page.keyboard.press("Delete")
+                    except Exception:
+                        pass
+                    await random_delay(0.08, 0.22)
+                    await box.press_sequentially(
+                        text, delay=int(random.randint(12, 38)),
+                    )
+                    await human_review_pause(min_sec=0.45, max_sec=1.3)
+                    if await _share_caption_appears_typed(page):
+                        _share_log.info(
+                            "Typed share caption via press_sequentially (%d chars): %r",
+                            len(text),
+                            text[:70],
+                        )
+                        await random_delay(0.35, 0.75)
+                        return True
+                except Exception as exc:
+                    _share_log.debug("Share caption press_sequentially failed (try %d): %s", attempt, exc)
+
+            try:
+                await box.focus(timeout=3_000)
+                try:
+                    await page.keyboard.press("Control+A")
+                    await page.keyboard.press("Delete")
+                    await random_delay(0.1, 0.25)
+                except Exception:
+                    pass
+                await human_type_into_focused(page, text, rng=random.Random())
+                await human_review_pause(min_sec=0.55, max_sec=2.0)
+                if await _share_caption_appears_typed(page):
+                    _share_log.info("Typed share caption via keyboard (%d chars): %r", len(text), text[:70])
+                    await random_delay(0.35, 0.75)
+                    return True
+            except Exception as exc:
+                _share_log.debug("Share caption keyboard typing failed (try %d): %s", attempt, exc)
+            await random_delay(0.25, 0.55)
+
+    # No locator or everything failed above — last resort typing to focused surface.
+    try:
         try:
             await page.keyboard.press("Control+A")
             await page.keyboard.press("Delete")
-            await random_delay(0.15, 0.35)
         except Exception:
             pass
-
-    await human_type_into_focused(page, body[:300], rng=random.Random())
-    await human_review_pause(min_sec=0.7, max_sec=2.2)
+        await human_type_into_focused(page, text, rng=random.Random())
+        await human_review_pause(min_sec=0.55, max_sec=2.0)
+    except Exception:
+        pass
 
     if not await _share_caption_appears_typed(page):
         _share_log.warning("Share caption not visible in composer after typing")
         return False
 
-    _share_log.info("Typed share caption (%d chars): %r", len(body), body[:70])
+    _share_log.info("Typed share caption (%d chars, fallback-focus): %r", len(text), text[:70])
     await random_delay(0.4, 0.9)
     return True
 
@@ -2966,23 +3664,53 @@ async def _fill_share_caption(page: Page, caption: str) -> bool:
     if not body:
         return False
 
-    opened = await _open_share_write_something(page)
     box = await _locate_share_caption_input(page)
+    if box is None:
+        opened = await _open_share_write_something(page)
+        if opened:
+            await random_delay(0.9, 1.6)
+        else:
+            try:
+                if await page.evaluate(_FOCUS_SHARE_TEXTAREA_JS):
+                    await random_delay(0.45, 0.9)
+                    opened = True
+            except Exception as exc:
+                _share_log.debug("JS textarea focus failed: %s", exc)
 
-    if box is None and not opened:
-        # Last resort: visible ServerTextArea — click then type via keyboard.
+    for attempt in range(1, 8):
+        if attempt > 1:
+            await random_delay(0.4, 0.85)
         try:
-            sta = page.locator('[data-mcomponent="ServerTextArea"]').first
-            if await sta.is_visible(timeout=1_500):
-                await sta.click(timeout=3_000)
-                await random_delay(0.35, 0.7)
-                return await _type_share_caption(page, None, body)
+            await page.evaluate(_FOCUS_SHARE_TEXTAREA_JS)
         except Exception:
             pass
-        _share_log.warning("Share caption box not found (Write something / ServerTextArea)")
-        return False
+        box = await _locate_share_caption_input(page)
+        if box is not None:
+            if await _type_share_caption(page, box, body):
+                return True
+            break
+        # Stub opened but textarea slow — one extra M-stub tap, never re-open placeholder.
+        if attempt == 3:
+            await _click_share_mtextarea_placeholder(page)
+            await random_delay(0.8, 1.4)
 
-    return await _type_share_caption(page, box, body)
+    if await _share_caption_appears_typed(page):
+        return await _type_share_caption(page, None, body)
+
+    try:
+        sta = page.locator(
+            '[role="dialog"] [data-mcomponent="ServerTextArea"], '
+            '[aria-modal="true"] [data-mcomponent="ServerTextArea"]'
+        ).first
+        if await sta.is_visible(timeout=1_200):
+            await sta.click(timeout=3_000)
+            await random_delay(0.4, 0.8)
+            return await _type_share_caption(page, None, body)
+    except Exception:
+        pass
+
+    _share_log.warning("Share caption box not found (Write something / ServerTextArea)")
+    return False
 
 
 async def _share_to_timeline(page: Page, *, caption: str) -> bool:
@@ -3001,7 +3729,7 @@ async def _share_to_timeline(page: Page, *, caption: str) -> bool:
 
     await random_delay(0.4, 0.9)
 
-    if await story_view_is_open(page):
+    if await _share_flow_blocked_by_story(page):
         _share_log.warning("Share aborted — still on story viewer (reel/story post)")
         await dismiss_story_view(page, log=_share_log)
         return False
@@ -3016,22 +3744,13 @@ async def _share_to_timeline(page: Page, *, caption: str) -> bool:
         _share_log.warning("Share aborted — Write something caption not typed")
         return False
     _share_log.info("Step 3/4: Share caption typed")
+    await random_delay(0.5, 1.0)
 
     if await _confirm_share_submit(page, allow_instant=False):
-        _share_log.info("Step 4/4: Share posted")
+        _share_log.info("Step 4/4: Share posted to profile")
         return True
 
-    for lbl in _SHARE_FINAL_POST_LABELS:
-        btn = page.get_by_role("button", name=re.compile(rf"^\s*{re.escape(lbl)}\s*$", re.I)).first
-        try:
-            if await btn.is_visible(timeout=1_200):
-                await btn.click(timeout=3_000)
-                await random_delay(0.8, 1.4)
-                _share_log.info("Step 4/4: Share posted via %r", lbl)
-                return True
-        except Exception:
-            continue
-    _share_log.warning("Share aborted — Post button not found")
+    _share_log.warning("Share aborted — Post button not found after caption")
     return False
 
 
@@ -3104,7 +3823,23 @@ async def share_post(
     if not share_now:
         return await _open_share_sheet(page, post_element)
 
-    if not await _open_share_sheet(page, post_element):
+    post = _resolve_locator(page, post_element)
+    post = await _refresh_share_post_locator(page, post)
+    try:
+        await post.scroll_into_view_if_needed()
+    except Exception:
+        pass
+    await random_delay(0.3, 0.7)
+    try:
+        from playwright_automation.post_engagement import post_is_story_or_reel
+
+        if await post_is_story_or_reel(post):
+            _share_log.warning("Share skipped — story/reel post (wrong UI)")
+            return False
+    except Exception:
+        pass
+
+    if not await _open_share_sheet(page, post):
         return False
 
     resolved_caption = await _ensure_share_caption(post_text, caption)
@@ -3113,11 +3848,15 @@ async def share_post(
 
     try:
         if target == "timeline":
-            return await _share_to_timeline(page, caption=resolved_caption)
+            return await _finalize_timeline_share(
+                page, await _share_to_timeline(page, caption=resolved_caption)
+            )
 
         resolved_target: ShareTarget = target
         if target == "auto":
-            if await _share_to_timeline(page, caption=resolved_caption):
+            if await _finalize_timeline_share(
+                page, await _share_to_timeline(page, caption=resolved_caption)
+            ):
                 return True
             _share_log.info("Timeline share failed — trying group fallback")
 
@@ -3143,7 +3882,9 @@ async def share_post(
             if ok:
                 return True
             _share_log.info("Group share failed — trying timeline again")
-            return await _share_to_timeline(page, caption=resolved_caption)
+            return await _finalize_timeline_share(
+                page, await _share_to_timeline(page, caption=resolved_caption)
+            )
         return False
     finally:
         await recover_one_step_back(page, log=_share_log, reason="share_post cleanup")

@@ -46,9 +46,10 @@ from playwright_automation.agent_executor import (  # noqa: E402
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-19-import-browser-stay-v23"
+_AGENT_BUILD = "2026-05-20-share-button-caption-v27"
 _DAILY_SHARE_STATE = "daily_share_quota.json"
 from playwright_automation.bot_core import BaseBot  # noqa: E402
+from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E402
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
 from playwright_automation.user_agent_rotation import UserAgentRotator  # noqa: E402
 
@@ -167,15 +168,26 @@ async def _agent_loop(
     min_daily_shares: int,
     feed_warmup_segments: int,
     profile_dir: Path,
-    feed_pre_warmed: bool = False,
 ) -> None:
+    from playwright_automation.agent_executor import browse_feed_warmup, ingest_feed_memory_from_viewport
+
     session = AgentSession()
-    session.feed_pre_warmed = feed_pre_warmed
     if mode == "brain":
         from playwright_automation.brain import ollama_is_available
 
         session.ollama_available = ollama_is_available()
     _apply_daily_share_state(session, profile_dir)
+    rng0 = random.Random()
+    if not session.feed_pre_warmed:
+        ws = min(max(feed_warmup_segments, 4), 8)
+        await browse_feed_warmup(
+            page,
+            rng=rng0,
+            scroll_segments=ws,
+            label="session start",
+            session=session,
+        )
+        session.feed_pre_warmed = True
     cycle_num = 0
     while not stop.is_set():
         cycle_num += 1
@@ -211,19 +223,18 @@ async def _agent_loop(
             rng = random.Random()
             if not skip_friends:
                 from playwright_automation.actions import return_to_feed
-                from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE
 
                 try:
                     sent = await bot.send_friend_requests_from_suggestions(
                         page=page,
                         min_audience=DEFAULT_MIN_AUDIENCE,
                         max_send=max_friend_send,
-                        scroll_rounds=max(friend_scroll_rounds, 50),
+                        scroll_rounds=max(1, friend_scroll_rounds),
                         stalk_min=friend_stalk_min,
                         stalk_max=friend_stalk_max,
                         profile_stalk_min_sec=profile_stalk_min_sec,
                         profile_stalk_max_sec=profile_stalk_max_sec,
-                        profile_stalk_max_engagements=profile_stalk_max_engagements,
+                        profile_stalk_max_engagements=0,
                         profile_stalk_min_appeal=profile_stalk_min_appeal,
                         profile_stalk_use_ollama=profile_stalk_use_ollama,
                         return_to_feed_after=True,
@@ -234,6 +245,7 @@ async def _agent_loop(
                     log.warning("Brain friend phase skipped: %s", exc)
                 await return_to_feed(page, log=log)
                 await random_delay(2.0, 4.0)
+            await ingest_feed_memory_from_viewport(page, session)
             await force_feed_comment(page, session)
             if shares_remaining_today(session, min_daily_shares) > 0:
                 await _share_one_to_own_timeline(
@@ -252,7 +264,11 @@ async def _agent_loop(
                     from playwright_automation.agent_executor import execute_agent_decision
                     from playwright_automation.ai_comment import generate_status_post
 
-                    post_text, _style = await generate_status_post()
+                    await ingest_feed_memory_from_viewport(page, session)
+                    post_text, _style = await generate_status_post(
+                        avoid_styles=session.recent_post_styles[-6:],
+                        feed_memory_snippets=session.feed_memory_snippets[-22:],
+                    )
                     post_decision = AgentDecision(
                         thought_process="Scheduled own status post for natural activity.",
                         location="newsfeed",
@@ -353,7 +369,6 @@ async def _run(args: argparse.Namespace) -> None:
         except (NotImplementedError, ValueError, RuntimeError):
             pass
 
-    feed_pre_warmed = False
     loop_failed = False
     try:
         await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=60_000)
@@ -367,12 +382,6 @@ async def _run(args: argparse.Namespace) -> None:
 
         await click_feed_tab(page, log=log)
         await random_delay(1.5, 3.0)
-        await browse_feed_warmup(
-            page,
-            scroll_segments=min(max(args.feed_warmup_segments, 4), 6),
-            label="after login",
-        )
-        feed_pre_warmed = True
 
         effective_mode = args.mode
         if args.mode == "brain":
@@ -398,23 +407,21 @@ async def _run(args: argparse.Namespace) -> None:
                 )
             else:
                 log.info(
-                    "structured cycle: friends → stalk %d–%d (~%.0f–%.0fs, "
-                    "like+comment ≤%d best posts) → feed × %d",
+                    "structured cycle: friends → light suggestions scroll, stalk %d–%d (~%.0f–%.0fs read-only), "
+                    "request if ≥%d followers/friends → feed × %d",
                     args.friend_stalk_min,
                     args.friend_stalk_max,
                     args.profile_stalk_min_sec,
                     args.profile_stalk_max_sec,
-                    args.profile_stalk_max_engagements,
+                    DEFAULT_MIN_AUDIENCE,
                     args.feed_rounds,
                 )
         else:
             log.info(
-                "brain cycle: Ollama steps=%d | profile stalk %.0f–%.0fs, "
-                "≤%d appealing posts/profile",
+                "brain cycle: Ollama steps=%d | friend stalk read-only %.0f–%.0fs (suggestions)",
                 args.steps_per_burst,
                 args.profile_stalk_min_sec,
                 args.profile_stalk_max_sec,
-                args.profile_stalk_max_engagements,
             )
         await _agent_loop(
             bot,
@@ -439,7 +446,6 @@ async def _run(args: argparse.Namespace) -> None:
             min_daily_shares=args.min_daily_shares,
             feed_warmup_segments=args.feed_warmup_segments,
             profile_dir=profile_dir,
-            feed_pre_warmed=feed_pre_warmed,
         )
     except asyncio.CancelledError:
         log.info("Agent interrupted — browser stays open until you close the tab.")
@@ -490,26 +496,26 @@ def main() -> None:
         action="store_false",
         help="Re-enable friends suggestions + accept before feed",
     )
-    p.add_argument("--max-friend-send", type=int, default=4, help="Max friend requests sent per cycle (≥3k audience)")
+    p.add_argument("--max-friend-send", type=int, default=4, help="Max friend requests per cycle (audience ≥ MIN_AUDIENCE_FRIEND_REQUEST, default 2k)")
     p.add_argument(
         "--friend-scroll-rounds",
         type=int,
-        default=0,
-        help="Scroll rounds on friend suggestions (disabled)",
+        default=6,
+        help="Light scroll passes on suggestions page (capped ~10; not 50×)",
     )
     p.add_argument("--friend-stalk-min", type=int, default=2, help="Min profiles to open and check per cycle")
     p.add_argument("--friend-stalk-max", type=int, default=4, help="Max profiles to open and check per cycle")
     p.add_argument(
         "--profile-stalk-min-sec",
         type=float,
-        default=28.0,
-        help="Seconds to browse each stalked profile/page (min)",
+        default=55.0,
+        help="Seconds to browse each stalked profile (min; friend phase ~1–2 min)",
     )
     p.add_argument(
         "--profile-stalk-max-sec",
         type=float,
-        default=45.0,
-        help="Seconds to browse each stalked profile/page (max)",
+        default=125.0,
+        help="Seconds to browse each stalked profile (max)",
     )
     p.add_argument(
         "--profile-stalk-engage",

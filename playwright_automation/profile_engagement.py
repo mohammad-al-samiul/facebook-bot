@@ -212,6 +212,8 @@ async def engage_selective_on_profile(
     """
     r = rng if rng is not None else random.Random()
     max_posts = max(0, min(int(max_posts), 3))
+    if max_posts <= 0:
+        return 0
 
     ranked = await collect_ranked_profile_posts(page, scan_limit=18)
     if not ranked:

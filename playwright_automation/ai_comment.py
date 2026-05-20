@@ -21,6 +21,8 @@ import os
 import random
 import re
 import ssl
+from collections.abc import Sequence
+from datetime import datetime
 from typing import Final
 
 import httpx
@@ -595,6 +597,25 @@ _STOPWORDS: Final[frozenset[str]] = frozenset({
     "করে", "করা", "হয়", "হবে", "আছে", "একটা", "এই", "তার", "কিন্তু",
 })
 
+# Scraped FB card often leaks app/OS chrome into ``inner_text``. Never build
+# captions/comments off these tokens (e.g. "Worth a read on cursor.").
+_KEYWORD_UI_NOISE: Final[frozenset[str]] = frozenset(
+    """
+    cursor vscode terminal instagram whatsapp telegram tiktok firefox safari
+    chromium messenger inbox sponsored suggested recommendations unity timeline
+    chrome plugin extension github gmail outlook android iphone ios ipad macos
+    windows linux notification cookies privacy policy terms reels watch video
+    play store app store localhost http https www com png jpg gif svg emoji
+    """.split()
+)
+
+
+def _effective_post_language(snippet: str) -> str:
+    """If any Bangla is present, lock to BN (avoids wrong EN share captions)."""
+    if _BANGLA_RE.search(snippet or ""):
+        return "bn"
+    return detect_post_language(snippet)
+
 
 def _extract_post_keywords(snippet: str, *, max_kw: int = 3) -> list[str]:
     """Pick a few meaningful tokens from the post for contextual offline comments."""
@@ -605,7 +626,7 @@ def _extract_post_keywords(snippet: str, *, max_kw: int = 3) -> list[str]:
     scored: list[tuple[int, str]] = []
     seen: set[str] = set()
     for tok in tokens:
-        if tok in _STOPWORDS or tok in seen:
+        if tok in _STOPWORDS or tok in seen or tok in _KEYWORD_UI_NOISE:
             continue
         seen.add(tok)
         scored.append((len(tok), tok))
@@ -615,7 +636,7 @@ def _extract_post_keywords(snippet: str, *, max_kw: int = 3) -> list[str]:
 
 def _contextual_comment_fallback(snippet: str, *, avoid: tuple[str, ...] = ()) -> str:
     """Offline comment that references the post topic — not a bare 'ভালো'."""
-    lang = detect_post_language(snippet)
+    lang = _effective_post_language(snippet)
     tone = _detect_tone(snippet)
     keywords = _extract_post_keywords(snippet)
     avoid_low = {a.lower().strip() for a in avoid if a}
@@ -808,6 +829,60 @@ _STATUS_STYLES: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 
+def _dhaka_now_line() -> str:
+    try:
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo("Asia/Dhaka"))
+        return now.strftime("%Y-%m-%d %H:%M %Z, weekday %A")
+    except Exception:
+        return ""
+
+
+def _season_sensitive_avoid_styles(feed_blob: str) -> list[str]:
+    """Reduce winter-weather clichés in months when that tone is usually wrong (BD)."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        m = datetime.now(ZoneInfo("Asia/Dhaka")).month
+    except Exception:
+        return []
+    low = (feed_blob or "").lower()
+    winter_ok = any(
+        x in low
+        for x in (
+            "শীত",
+            "কুয়াশা",
+            "কুয়াশা",
+            "ঠাণ্ডা",
+            "winter",
+            "fog",
+            "mist",
+            "cold morning",
+            "cold weather",
+        )
+    )
+    if m in (3, 4, 5, 6, 7, 8, 9, 10) and not winter_ok:
+        return ["weather"]
+    return []
+
+
+def _offline_status_from_feed_memory(mem: list[str], *, lang: str) -> str | None:
+    """When Ollama is down, still sound like the current feed (not random weather)."""
+    if not mem:
+        return None
+    blob = clean_post_text(" ".join(mem[-8:]), max_chars=520)
+    kws = [k for k in _extract_post_keywords(blob, max_kw=5) if k and len(k) > 1]
+    if lang == "bn":
+        if kws:
+            lead = " / ".join(kws[:3])
+            return f"ফিডে {lead} নিয়েই এখন আলোচনা—তোমাদের কী মনে হচ্ছে?"
+        return "ফিড ঘুরতে গিয়ে বেশ কিছু আপডেট পেলাম—সবাই কেমন আছো?"
+    if kws:
+        return f"My feed is full of {' / '.join(kws[:3])} right now — what's on your mind?"
+    return "Scrolled the feed and saw a lot of good updates — how's everyone doing?"
+
+
 def pick_status_post_style(*, avoid: list[str] | None = None) -> str:
     """Pick a post topic style not used recently (for variety)."""
     avoid_set = {a.strip().lower() for a in (avoid or []) if a}
@@ -822,19 +897,36 @@ async def generate_status_post(
     prefer_bn: bool | None = None,
     timeout: float = 60.0,
     avoid_styles: list[str] | None = None,
+    feed_memory_snippets: Sequence[str] | None = None,
 ) -> tuple[str, str]:
     """
     Varied short status for the feed composer.
+
+    When ``feed_memory_snippets`` is set (recent visible post texts from scrolling),
+    the model is steered toward **current feed topics** and away from contradictory
+    seasonal fluff.
 
     Returns ``(text, style_key)`` — style rotates (food, sports, family, etc.).
     """
     import asyncio
 
+    mem = [
+        m.strip()
+        for m in (feed_memory_snippets or ())
+        if m and len(m.strip()) > 15
+    ][-22:]
+    feed_blob = "\n".join(mem)
+    season_extra = _season_sensitive_avoid_styles(feed_blob)
+    merged_avoid = list(
+        dict.fromkeys([*(avoid_styles or []), *season_extra])
+    )
+
     use_bn = prefer_bn if prefer_bn is not None else random.random() < 0.55
     lang = "bn" if use_bn else "en"
-    style = pick_status_post_style(avoid=avoid_styles)
+    style = pick_status_post_style(avoid=merged_avoid)
     pool = _STATUS_STYLES[style][lang]
     fallback = random.choice(pool)
+    dhaka = _dhaka_now_line()
 
     style_hints_bn = {
         "weather": "আবহাওয়া/মৌসুম",
@@ -863,30 +955,75 @@ async def generate_status_post(
         "nature": "nature or outdoors",
     }
     hint = style_hints_bn.get(style, style) if use_bn else style_hints_en.get(style, style)
-    avoid_txt = ", ".join(avoid_styles or []) or "none"
+    avoid_txt = ", ".join(merged_avoid) or "none"
 
-    try:
-        from playwright_automation.brain import _chat, _default_model
-
+    if mem:
+        bullets = "\n".join(f"- {clean_post_text(s, max_chars=140)}" for s in mem[-14:])
         if use_bn:
+            topic_tail = (
+                "ফিডে তুমি যা যা দেখছ (স্নিপেট উপরে), তার সাথে **সাদৃশ্যপূর্ণ** একটা ছোট স্ট্যাটাস লেখো—"
+                "নতুন টেক্সট, ক্লিশে না। ফিডে না থাকা ভুল মৌসুম/আবহাওয়া বর্ণনা করবে না।"
+            )
+            user = (
+                f"বর্তমান সময় (ঢাকা): {dhaka or '(অজানা)'}\n"
+                f"ফিড থেকে সংক্ষেপিত পড়া:\n{bullets}\n\n"
+                f"{topic_tail}\n"
+                f"(ঐচ্ছিক টোন সংকেত: {hint}; আগের স্টাইল এড়াও: {avoid_txt})। "
+                "সরাসরি একটিমাত্র লাইন লেখো (১২০ অক্ষরের নিচে)। হ্যাশট্যাগ নয়।"
+            )
+        else:
+            topic_tail = (
+                "Mirror the FEED CONTEXT above — same themes people are buzzing about — "
+                "with your **own wording**. Do NOT invent wrong-season weather that contradicts reality."
+            )
+            user = (
+                f"Local time hint (Dhaka): {dhaka or 'unknown'}\n"
+                f"Things recently visible on their feed:\n{bullets}\n\n"
+                f"{topic_tail}\n"
+                f"(Optional tone cue: {hint}; avoid stale styles: {avoid_txt}). "
+                "Exactly one short sentence, ≤120 chars, no hashtags."
+            )
+        if use_bn:
+            system = (
+                "তুমি Facebook-এ মানুষের মতো স্ট্যাটাস লেখো। "
+                "ফিডে যা ফোকাস করা হয়েছে তার সাথে **মিল রাখাটাই গুরুত্বপূর্ণ**। "
+                "বাংলায়। ১–২ বাক্য, সর্বোচ্চ ১২০ অক্ষর। হ্যাশট্যাগ নয়। কটুক্তি/রাজনীতি নয়। "
+                "শুধু পোস্ট টেক্সট।"
+            )
+        else:
+            system = (
+                "You write natural Facebook statuses. The feed context is **authoritative**: "
+                "stay on those topics / vibe. English only. 1–2 sentences, max 120 chars. "
+                "No hashtags. No politics."
+            )
+    else:
+        if use_bn:
+            _bd_now = dhaka or "স্থানীয় সময় অজানা"
             system = (
                 "তুমি Facebook-এ মানুষের মতো **বিভিন্ন ধরনের** ছোট স্ট্যাটাস লেখো। "
                 "প্রতিবার আলাদা টপিক ও ভাব। শুধু বাংলায়। ১–২ বাক্য, সর্বোচ্চ ১২০ অক্ষর। "
-                "হ্যাশট্যাগ নয়। কটুক্তি/রাজনীতি নয়। শুধু পোস্ট টেক্সট।"
+                "হ্যাশট্যাগ নয়। কটুক্তি/রাজনীতি নয়। শুধু পোস্ট টেক্সট। "
+                f"(বাস্তব সময় সংকেত: এখন {_bd_now}। বাস্তবতার সাথে বিরোধপূর্ণ মৌসুম লিখবে না।)"
             )
             user = (
-                f"এবারের টপিক: {hint}। আগের স্টাইল এড়াও: {avoid_txt}। "
+                f"এবারের টপিক টোন: {hint}। আগের স্টাইল এড়াও: {avoid_txt}। "
                 "সাধারণ 'ভালো দিন' টাইপ ক্লিশে লিখবে না। নতুন কিছু লেখো।"
             )
         else:
             system = (
                 "You write varied Facebook status posts — different topic and tone each time. "
-                "English only. 1–2 sentences, max 120 chars. No hashtags. No politics."
+                "English only. 1–2 sentences, max 120 chars. No hashtags. No politics. "
+                f"Time cue (Dhaka): {dhaka or 'unknown'} — avoid seasonal mismatch."
             )
             user = (
                 f"Topic for this post: {hint}. Avoid repeating these recent styles: {avoid_txt}. "
                 "Do NOT write another generic 'good day' post — be specific."
             )
+
+    fed_off = _offline_status_from_feed_memory(mem, lang=lang)
+
+    try:
+        from playwright_automation.brain import _chat, _default_model
 
         raw = await asyncio.wait_for(
             asyncio.to_thread(
@@ -903,6 +1040,10 @@ async def generate_status_post(
             return text[:120], style
     except Exception as exc:
         logger.debug("Ollama status failed: %s", exc)
+
+    if fed_off:
+        logger.info("Using feed-aware offline status (%s): %r", lang, fed_off[:80])
+        return fed_off[:120], "question" if "?" in fed_off else style
 
     logger.info("Using offline %s status fallback (style=%s)", lang, style)
     return fallback, style
@@ -978,7 +1119,7 @@ async def generate_comment_for_post(
 
 def _share_caption_fallback(snippet: str, *, avoid: tuple[str, ...] = ()) -> str:
     """Offline share caption when LLM is unavailable."""
-    lang = detect_post_language(snippet)
+    lang = _effective_post_language(snippet)
     keywords = _extract_post_keywords(snippet)
     avoid_low = {a.lower().strip() for a in avoid if a}
 
@@ -1031,7 +1172,7 @@ async def generate_share_caption_for_post(
     if not snippet:
         return _share_caption_fallback("", avoid=avoid_captions)
 
-    lang = detect_post_language(snippet)
+    lang = _effective_post_language(snippet)
     keywords = tuple(_extract_post_keywords(snippet))
     logger.info(
         "Post for share caption (%s, %d chars, kw=%s): %r",
