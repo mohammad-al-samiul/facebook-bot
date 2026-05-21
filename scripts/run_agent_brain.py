@@ -49,7 +49,7 @@ from playwright_automation.agent_executor import (  # noqa: E402
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-21-trending-status-v29"
+_AGENT_BUILD = "2026-05-21-friend-ollama-v30"
 _DAILY_SHARE_STATE = "daily_share_quota.json"
 _DAILY_FRIEND_STATE = "daily_friend_quota.json"
 from playwright_automation.bot_core import BaseBot  # noqa: E402

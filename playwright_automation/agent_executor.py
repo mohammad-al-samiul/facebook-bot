@@ -220,19 +220,23 @@ async def run_daily_friend_send_phase(
     )
 
     try:
+        min_goal = 1 if remaining > 0 else 0
         sent = await bot.send_friend_requests_from_suggestions(
             page=page,
             min_audience=min_audience,
             max_send=burst,
             scroll_rounds=friend_scroll_rounds,
             stalk_min=stalk_lo,
-            stalk_max=stalk_hi,
+            stalk_max=max(stalk_hi, 6 if min_goal else stalk_hi),
             profile_stalk_min_sec=profile_stalk_min_sec,
             profile_stalk_max_sec=profile_stalk_max_sec,
             profile_stalk_max_engagements=profile_stalk_max_engagements,
             profile_stalk_min_appeal=profile_stalk_min_appeal,
             profile_stalk_use_ollama=profile_stalk_use_ollama,
             return_to_feed_after=return_to_feed_after,
+            min_send_goal=min_goal,
+            random_stalk_min=15,
+            random_stalk_max=20,
         )
     except Exception as exc:
         _log.warning("Daily friend send phase failed: %s", exc)

@@ -41,13 +41,13 @@ class PostAnalysis:
     reaction_type: ReactionType
 
 
-def _ollama_base_url() -> str:
+def _configured_ollama_base_url() -> str:
     """
-    Resolve Ollama HTTP base URL.
+    URL from env only (no probing).
 
     Priority:
-    1. ``OLLAMA_BASE_URL`` (e.g. ``http://127.0.0.1:18000``)
-    2. ``OLLAMA_HOST`` (Ollama CLI style, e.g. ``127.0.0.1:18000``)
+    1. ``OLLAMA_BASE_URL``
+    2. ``OLLAMA_HOST`` (CLI style host:port)
     3. Default ``http://127.0.0.1:11434``
     """
     explicit = (os.environ.get("OLLAMA_BASE_URL") or "").strip()
@@ -61,13 +61,59 @@ def _ollama_base_url() -> str:
     return DEFAULT_OLLAMA_BASE_URL
 
 
+_OLLAMA_PROBE_FALLBACKS: tuple[str, ...] = (
+    DEFAULT_OLLAMA_BASE_URL,
+    "http://127.0.0.1:18000",
+)
+_resolved_ollama_base_url: str | None = None
+
+
+def _ollama_candidate_urls() -> list[str]:
+    configured = _configured_ollama_base_url()
+    out: list[str] = []
+    for url in (configured, *_OLLAMA_PROBE_FALLBACKS):
+        u = url.rstrip("/")
+        if u not in out:
+            out.append(u)
+    return out
+
+
+def resolve_ollama_base_url(*, timeout: float = 3.0) -> str | None:
+    """First reachable Ollama base URL (env first, then 11434 / 18000)."""
+    global _resolved_ollama_base_url
+    if _resolved_ollama_base_url and ollama_is_available(
+        base_url=_resolved_ollama_base_url, timeout=timeout
+    ):
+        return _resolved_ollama_base_url
+    configured = _configured_ollama_base_url()
+    for url in _ollama_candidate_urls():
+        if ollama_is_available(base_url=url, timeout=timeout):
+            _resolved_ollama_base_url = url
+            if url != configured:
+                import logging
+
+                logging.getLogger(__name__).info(
+                    "Ollama reachable at %s (configured %s was down — using fallback)",
+                    url,
+                    configured,
+                )
+            return url
+    _resolved_ollama_base_url = None
+    return None
+
+
+def _ollama_base_url() -> str:
+    """Effective Ollama URL (probes once, then caches)."""
+    return resolve_ollama_base_url() or _configured_ollama_base_url()
+
+
 def _default_model() -> str:
     return os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL)
 
 
 def ollama_is_available(*, base_url: str | None = None, timeout: float = 4.0) -> bool:
     """True when Ollama responds on the chat API port (used before brain mode)."""
-    url = f"{(base_url or _ollama_base_url()).rstrip('/')}/api/tags"
+    url = f"{(base_url or _configured_ollama_base_url()).rstrip('/')}/api/tags"
     try:
         with httpx.Client(timeout=timeout) as client:
             r = client.get(url)
