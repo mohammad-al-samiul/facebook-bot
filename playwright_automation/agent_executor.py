@@ -141,10 +141,120 @@ class AgentSession:
     ollama_available: bool | None = None
     offline_step: int = 0
     feed_memory_snippets: list[str] = field(default_factory=list)
+    friends_sent_today: int = 0
+    friend_quota_day: str = ""
+    daily_friend_target: int = 5
+    daily_friend_min: int = 4
+    daily_friend_max: int = 5
 
 
 def _today_key() -> str:
     return date.today().isoformat()
+
+
+def refresh_friend_quota_day(session: AgentSession) -> None:
+    """Reset daily friend-send counter; pick a new 4–5 target when the day rolls over."""
+    key = _today_key()
+    if session.friend_quota_day != key:
+        session.friend_quota_day = key
+        session.friends_sent_today = 0
+        lo = max(1, int(session.daily_friend_min))
+        hi = max(lo, int(session.daily_friend_max))
+        session.daily_friend_target = random.randint(lo, hi)
+        _log.info(
+            "New day — daily friend-send target=%d (range %d–%d, audience ≥%d)",
+            session.daily_friend_target,
+            lo,
+            hi,
+            DEFAULT_MIN_AUDIENCE,
+        )
+
+
+def friends_remaining_today(session: AgentSession) -> int:
+    refresh_friend_quota_day(session)
+    return max(0, session.daily_friend_target - session.friends_sent_today)
+
+
+async def run_daily_friend_send_phase(
+    bot: BaseBot,
+    page: Page,
+    session: AgentSession,
+    *,
+    min_audience: int = DEFAULT_MIN_AUDIENCE,
+    max_send_per_burst: int = 5,
+    friend_scroll_rounds: int = 6,
+    friend_stalk_min: int = 2,
+    friend_stalk_max: int = 4,
+    profile_stalk_min_sec: float = 55.0,
+    profile_stalk_max_sec: float = 125.0,
+    profile_stalk_max_engagements: int = 0,
+    profile_stalk_min_appeal: float = 42.0,
+    profile_stalk_use_ollama: bool = True,
+    return_to_feed_after: bool = True,
+) -> int:
+    """
+    Send friend requests until the **daily** target (default 4–5) is met.
+
+    Each opened profile must have friends **or** followers ≥ ``min_audience`` (default 2000).
+    """
+    remaining = friends_remaining_today(session)
+    if remaining <= 0:
+        _log.info(
+            "Daily friend sends complete (%d/%d today, audience ≥%d)",
+            session.friends_sent_today,
+            session.daily_friend_target,
+            min_audience,
+        )
+        return 0
+
+    burst = min(remaining, max(1, max_send_per_burst))
+    stalk_hi = max(friend_stalk_max, min(remaining + 2, 8))
+    stalk_lo = min(friend_stalk_min, stalk_hi)
+
+    _log.info(
+        "Friend phase: send up to %d now (%d/%d daily goal, ≥%d friends/followers)",
+        burst,
+        session.friends_sent_today,
+        session.daily_friend_target,
+        min_audience,
+    )
+
+    try:
+        sent = await bot.send_friend_requests_from_suggestions(
+            page=page,
+            min_audience=min_audience,
+            max_send=burst,
+            scroll_rounds=friend_scroll_rounds,
+            stalk_min=stalk_lo,
+            stalk_max=stalk_hi,
+            profile_stalk_min_sec=profile_stalk_min_sec,
+            profile_stalk_max_sec=profile_stalk_max_sec,
+            profile_stalk_max_engagements=profile_stalk_max_engagements,
+            profile_stalk_min_appeal=profile_stalk_min_appeal,
+            profile_stalk_use_ollama=profile_stalk_use_ollama,
+            return_to_feed_after=return_to_feed_after,
+        )
+    except Exception as exc:
+        _log.warning("Daily friend send phase failed: %s", exc)
+        return 0
+
+    if sent > 0:
+        session.friends_sent_today += sent
+        session.recent_actions.append("send_friend_request")
+        _log.info(
+            "Friend requests sent=%d (today %d/%d, audience ≥%d)",
+            sent,
+            session.friends_sent_today,
+            session.daily_friend_target,
+            min_audience,
+        )
+    else:
+        _log.info(
+            "No friend requests sent this burst (today %d/%d)",
+            session.friends_sent_today,
+            session.daily_friend_target,
+        )
+    return sent
 
 
 def refresh_share_quota_day(session: AgentSession) -> None:
@@ -513,12 +623,16 @@ async def execute_agent_decision(
             _log.info("send_friend_request → %s", status)
             await return_to_feed(page, log=_log)
             return status == "sent"
-        n = await bot.send_friend_requests_from_suggestions(
-            page=page,
+        if friends_remaining_today(session) <= 0:
+            _log.info("send_friend_request skipped — daily friend goal already met")
+            return False
+        n = await run_daily_friend_send_phase(
+            bot,
+            page,
+            session,
             min_audience=DEFAULT_MIN_AUDIENCE,
-            max_send=1,
+            max_send_per_burst=1,
         )
-        await return_to_feed(page, log=_log)
         return n > 0
 
     if action == "accept_friend_request":
@@ -545,11 +659,15 @@ async def execute_agent_decision(
         await click_feed_tab(page, log=_log)
         await random_delay(0.8, 1.5)
         draft = (decision.action_data.post_content or "").strip()
+        style_key = ""
         if not draft:
-            draft, _ = await generate_status_post(
+            draft, style_key = await generate_status_post(
                 avoid_styles=session.recent_post_styles[-6:],
                 feed_memory_snippets=_recent_feed_memory_blob(session),
             )
+        if not draft.strip() or style_key == "skip":
+            _log.warning("create_post: skipped — need more feed scroll / trending topics")
+            return False
         ok = await create_feed_post(page, draft)
         if ok:
             session.posts_this_session += 1
@@ -831,27 +949,28 @@ async def run_structured_cycle(
             _log.warning("Feed has no posts — skipping engagement this cycle")
             return
     else:
-        _log.info("======== Phase 1/3: Suggestions (light scroll → stalk 2–4 → ≥%d) ========", DEFAULT_MIN_AUDIENCE)
-        try:
-            sent = await bot.send_friend_requests_from_suggestions(
-                page=page,
-                min_audience=DEFAULT_MIN_AUDIENCE,
-                max_send=max_friend_send,
-                scroll_rounds=friend_scroll_rounds,
-                stalk_min=friend_stalk_min,
-                stalk_max=friend_stalk_max,
-                profile_stalk_min_sec=profile_stalk_min_sec,
-                profile_stalk_max_sec=profile_stalk_max_sec,
-                profile_stalk_max_engagements=0,
-                profile_stalk_min_appeal=profile_stalk_min_appeal,
-                profile_stalk_use_ollama=profile_stalk_use_ollama,
-                return_to_feed_after=False,
-            )
-            if sent:
-                _log.info("Friend SEND: %d request(s)", sent)
-                session.recent_actions.append("send_friend_request")
-        except Exception as exc:
-            _log.warning("Friend send skipped: %s", exc)
+        _log.info(
+            "======== Phase 1/3: Daily friend send (goal %d–%d/day, ≥%d friends/followers) ========",
+            session.daily_friend_min,
+            session.daily_friend_max,
+            DEFAULT_MIN_AUDIENCE,
+        )
+        await run_daily_friend_send_phase(
+            bot,
+            page,
+            session,
+            min_audience=DEFAULT_MIN_AUDIENCE,
+            max_send_per_burst=max_friend_send,
+            friend_scroll_rounds=friend_scroll_rounds,
+            friend_stalk_min=friend_stalk_min,
+            friend_stalk_max=friend_stalk_max,
+            profile_stalk_min_sec=profile_stalk_min_sec,
+            profile_stalk_max_sec=profile_stalk_max_sec,
+            profile_stalk_max_engagements=0,
+            profile_stalk_min_appeal=profile_stalk_min_appeal,
+            profile_stalk_use_ollama=profile_stalk_use_ollama,
+            return_to_feed_after=False,
+        )
 
         await return_to_feed(page, log=_log)
         await smooth_scroll(page, total_pixels=rng.randint(280, 480), duration_sec=rng.uniform(1.6, 2.6))
@@ -950,12 +1069,17 @@ async def run_structured_cycle(
     except Exception:
         pass
     await random_delay(1.5, 2.5)
-    await ingest_feed_memory_from_viewport(page, session)
+    await human_scroll(page, segments=rng.randint(2, 4))
+    await ingest_feed_memory_from_viewport(page, session, limit=18)
+    await human_scroll(page, segments=rng.randint(1, 3))
+    await ingest_feed_memory_from_viewport(page, session, limit=18)
     status, style = await generate_status_post(
         avoid_styles=session.recent_post_styles[-6:],
         feed_memory_snippets=_recent_feed_memory_blob(session),
     )
-    if await create_feed_post(page, status):
+    if not status.strip() or style == "skip":
+        _log.warning("Status post skipped — read more feed before posting")
+    elif await create_feed_post(page, status):
         session.posts_this_session += 1
         session.recent_post_styles.append(style)
         session.recent_actions.append("create_post")

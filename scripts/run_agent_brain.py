@@ -40,14 +40,18 @@ from playwright_automation.agent_executor import (  # noqa: E402
     agent_step,
     browse_feed_warmup,
     force_feed_comment,
+    friends_remaining_today,
+    refresh_friend_quota_day,
+    run_daily_friend_send_phase,
     run_structured_cycle,
     shares_remaining_today,
     _share_one_to_own_timeline,
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-20-share-button-caption-v27"
+_AGENT_BUILD = "2026-05-21-trending-status-v29"
 _DAILY_SHARE_STATE = "daily_share_quota.json"
+_DAILY_FRIEND_STATE = "daily_friend_quota.json"
 from playwright_automation.bot_core import BaseBot  # noqa: E402
 from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E402
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
@@ -144,6 +148,61 @@ def _apply_daily_share_state(session, profile_dir: Path) -> None:
         log.info("Loaded daily shares: %d today (persisted)", session.shares_today)
 
 
+def _load_daily_friend_state(profile_dir: Path) -> tuple[str, int, int]:
+    path = profile_dir / _DAILY_FRIEND_STATE
+    if not path.is_file():
+        return "", 0, 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return (
+            str(data.get("day", "")),
+            int(data.get("friends_sent_today", 0)),
+            int(data.get("daily_friend_target", 0)),
+        )
+    except Exception:
+        return "", 0, 0
+
+
+def _save_daily_friend_state(profile_dir: Path, session) -> None:
+    refresh_friend_quota_day(session)
+    path = profile_dir / _DAILY_FRIEND_STATE
+    try:
+        path.write_text(
+            json.dumps(
+                {
+                    "day": session.friend_quota_day,
+                    "friends_sent_today": session.friends_sent_today,
+                    "daily_friend_target": session.daily_friend_target,
+                    "daily_friend_min": session.daily_friend_min,
+                    "daily_friend_max": session.daily_friend_max,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log.debug("Could not persist daily friend state: %s", exc)
+
+
+def _apply_daily_friend_state(session, profile_dir: Path) -> None:
+    from datetime import date
+
+    day, sent, target = _load_daily_friend_state(profile_dir)
+    today = date.today().isoformat()
+    refresh_friend_quota_day(session)
+    if day == today:
+        session.friends_sent_today = sent
+        if target > 0:
+            session.daily_friend_target = target
+        log.info(
+            "Loaded daily friends: %d/%d sent today (target %d, audience ≥%d)",
+            session.friends_sent_today,
+            session.daily_friend_target,
+            session.daily_friend_target,
+            DEFAULT_MIN_AUDIENCE,
+        )
+
+
 async def _agent_loop(
     bot: BaseBot,
     page,
@@ -168,15 +227,20 @@ async def _agent_loop(
     min_daily_shares: int,
     feed_warmup_segments: int,
     profile_dir: Path,
+    daily_friend_min: int,
+    daily_friend_max: int,
 ) -> None:
     from playwright_automation.agent_executor import browse_feed_warmup, ingest_feed_memory_from_viewport
 
     session = AgentSession()
+    session.daily_friend_min = daily_friend_min
+    session.daily_friend_max = daily_friend_max
     if mode == "brain":
         from playwright_automation.brain import ollama_is_available
 
         session.ollama_available = ollama_is_available()
     _apply_daily_share_state(session, profile_dir)
+    _apply_daily_friend_state(session, profile_dir)
     rng0 = random.Random()
     if not session.feed_pre_warmed:
         ws = min(max(feed_warmup_segments, 4), 8)
@@ -216,35 +280,35 @@ async def _agent_loop(
                 feed_warmup_segments=feed_warmup_segments,
             )
             _save_daily_share_state(profile_dir, session)
+            _save_daily_friend_state(profile_dir, session)
         else:
             log.info("======== Starting brain cycle #%d (Ollama llama3.1) ========", cycle_num)
             session.comments_this_session = 0
             session.likes_this_session = 0
             rng = random.Random()
-            if not skip_friends:
-                from playwright_automation.actions import return_to_feed
-
-                try:
-                    sent = await bot.send_friend_requests_from_suggestions(
-                        page=page,
-                        min_audience=DEFAULT_MIN_AUDIENCE,
-                        max_send=max_friend_send,
-                        scroll_rounds=max(1, friend_scroll_rounds),
-                        stalk_min=friend_stalk_min,
-                        stalk_max=friend_stalk_max,
-                        profile_stalk_min_sec=profile_stalk_min_sec,
-                        profile_stalk_max_sec=profile_stalk_max_sec,
-                        profile_stalk_max_engagements=0,
-                        profile_stalk_min_appeal=profile_stalk_min_appeal,
-                        profile_stalk_use_ollama=profile_stalk_use_ollama,
-                        return_to_feed_after=True,
-                    )
-                    if sent:
-                        log.info("Brain cycle: friend requests sent=%d", sent)
-                except Exception as exc:
-                    log.warning("Brain friend phase skipped: %s", exc)
-                await return_to_feed(page, log=log)
+            if not skip_friends and friends_remaining_today(session) > 0:
+                await run_daily_friend_send_phase(
+                    bot,
+                    page,
+                    session,
+                    min_audience=DEFAULT_MIN_AUDIENCE,
+                    max_send_per_burst=max_friend_send,
+                    friend_scroll_rounds=friend_scroll_rounds,
+                    friend_stalk_min=friend_stalk_min,
+                    friend_stalk_max=friend_stalk_max,
+                    profile_stalk_min_sec=profile_stalk_min_sec,
+                    profile_stalk_max_sec=profile_stalk_max_sec,
+                    profile_stalk_max_engagements=0,
+                    profile_stalk_min_appeal=profile_stalk_min_appeal,
+                    profile_stalk_use_ollama=profile_stalk_use_ollama,
+                )
                 await random_delay(2.0, 4.0)
+            elif not skip_friends:
+                log.info(
+                    "Brain cycle: daily friend goal done (%d/%d)",
+                    session.friends_sent_today,
+                    session.daily_friend_target,
+                )
             await ingest_feed_memory_from_viewport(page, session)
             await force_feed_comment(page, session)
             if shares_remaining_today(session, min_daily_shares) > 0:
@@ -264,11 +328,14 @@ async def _agent_loop(
                     from playwright_automation.agent_executor import execute_agent_decision
                     from playwright_automation.ai_comment import generate_status_post
 
-                    await ingest_feed_memory_from_viewport(page, session)
+                    await ingest_feed_memory_from_viewport(page, session, limit=18)
                     post_text, _style = await generate_status_post(
                         avoid_styles=session.recent_post_styles[-6:],
                         feed_memory_snippets=session.feed_memory_snippets[-22:],
                     )
+                    if not post_text.strip() or _style == "skip":
+                        log.warning("Brain: skipped status — trending topics not ready")
+                        continue
                     post_decision = AgentDecision(
                         thought_process="Scheduled own status post for natural activity.",
                         location="newsfeed",
@@ -297,6 +364,7 @@ async def _agent_loop(
                     min_daily_shares=min_daily_shares,
                 )
             _save_daily_share_state(profile_dir, session)
+            _save_daily_friend_state(profile_dir, session)
 
         gap = random.uniform(min_pause, max_pause)
         log.info("Pause %.1fs before next cycle", gap)
@@ -407,22 +475,26 @@ async def _run(args: argparse.Namespace) -> None:
                 )
             else:
                 log.info(
-                    "structured cycle: friends → light suggestions scroll, stalk %d–%d (~%.0f–%.0fs read-only), "
-                    "request if ≥%d followers/friends → feed × %d",
+                    "structured cycle: daily friend send %d–%d (≥%d friends/followers), stalk %d–%d, "
+                    "then feed × %d",
+                    args.daily_friend_min,
+                    args.daily_friend_max,
+                    DEFAULT_MIN_AUDIENCE,
                     args.friend_stalk_min,
                     args.friend_stalk_max,
-                    args.profile_stalk_min_sec,
-                    args.profile_stalk_max_sec,
-                    DEFAULT_MIN_AUDIENCE,
                     args.feed_rounds,
                 )
         else:
-            log.info(
-                "brain cycle: Ollama steps=%d | friend stalk read-only %.0f–%.0fs (suggestions)",
-                args.steps_per_burst,
-                args.profile_stalk_min_sec,
-                args.profile_stalk_max_sec,
-            )
+            if args.skip_friends:
+                log.info("brain cycle: feed only (--skip-friends)")
+            else:
+                log.info(
+                    "brain cycle: daily friend send %d–%d/day (≥%d) | Ollama steps=%d",
+                    args.daily_friend_min,
+                    args.daily_friend_max,
+                    DEFAULT_MIN_AUDIENCE,
+                    args.steps_per_burst,
+                )
         await _agent_loop(
             bot,
             page,
@@ -446,6 +518,8 @@ async def _run(args: argparse.Namespace) -> None:
             min_daily_shares=args.min_daily_shares,
             feed_warmup_segments=args.feed_warmup_segments,
             profile_dir=profile_dir,
+            daily_friend_min=args.daily_friend_min,
+            daily_friend_max=args.daily_friend_max,
         )
     except asyncio.CancelledError:
         log.info("Agent interrupted — browser stays open until you close the tab.")
@@ -496,7 +570,24 @@ def main() -> None:
         action="store_false",
         help="Re-enable friends suggestions + accept before feed",
     )
-    p.add_argument("--max-friend-send", type=int, default=4, help="Max friend requests per cycle (audience ≥ MIN_AUDIENCE_FRIEND_REQUEST, default 2k)")
+    p.add_argument(
+        "--daily-friend-min",
+        type=int,
+        default=4,
+        help="Min friend requests to send per calendar day (only if audience ≥ MIN_AUDIENCE_FRIEND_REQUEST)",
+    )
+    p.add_argument(
+        "--daily-friend-max",
+        type=int,
+        default=5,
+        help="Max friend requests to send per calendar day (random target between min and max each day)",
+    )
+    p.add_argument(
+        "--max-friend-send",
+        type=int,
+        default=5,
+        help="Max friend requests per cycle burst (capped by remaining daily quota; audience ≥ 2k)",
+    )
     p.add_argument(
         "--friend-scroll-rounds",
         type=int,

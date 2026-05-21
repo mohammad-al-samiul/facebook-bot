@@ -213,29 +213,49 @@ _COLLECT_SUGGESTION_PROFILES_JS: Final[str] = """
 () => {
   const seen = new Set();
   const out = [];
+  const skipPath = /\\/friends\\/|\\/groups\\/|\\/watch|\\/login|\\/help|suggestions|requests|policies|privacy/i;
+  const badUser = new Set(['pages','people','photo.php','home.php','share','groups','events','gaming']);
+
+  function push(href, rowText) {
+    if (!href || seen.has(href)) return;
+    seen.add(href);
+    out.push({ href, rowText: (rowText || '').slice(0, 400) });
+  }
+
+  function normalizeHref(raw) {
+    let href = (raw || '').split('#')[0].trim();
+    if (!href || skipPath.test(href)) return null;
+    if (href.includes('profile.php') && href.includes('id=')) {
+      const m = href.match(/id=(\\d+)/);
+      if (m) return 'https://www.facebook.com/profile.php?id=' + m[1];
+      return null;
+    }
+    const m = href.match(/facebook\\.com\\/([^/?]+)/i);
+    if (!m || badUser.has(m[1])) return null;
+    return 'https://www.facebook.com/' + m[1];
+  }
+
+  // Mobile suggestions often expose profile links outside the Add Friend button subtree.
+  for (const a of document.querySelectorAll('a[href], [role="link"][href]')) {
+    const norm = normalizeHref(a.href || a.getAttribute('href') || '');
+    if (norm) push(norm, (a.closest('[role="listitem"], [data-visualcompletion]') || a).innerText);
+  }
+
   const addRe = /add\\s*friend|friend\\s*request|বন্ধু|যোগ/i;
-  const skipPath = /\\/friends|\\/groups|\\/watch|\\/login|\\/help/i;
+  const rowSel = '[role="listitem"], [data-visualcompletion], [data-mcomponent]';
   const buttons = document.querySelectorAll('[role="button"], a[role="button"]');
   for (const btn of buttons) {
     const label = (btn.innerText || btn.getAttribute('aria-label') || '');
     if (!addRe.test(label)) continue;
-    let el = btn;
-    for (let depth = 0; depth < 14 && el; depth++) {
-      const links = el.querySelectorAll('a[href]');
-      for (const a of links) {
-        let href = a.href || a.getAttribute('href') || '';
-        if (!href || skipPath.test(href)) continue;
-        if (href.includes('profile.php?id=')) {
-          const m = href.match(/id=(\\d+)/);
-          if (m) href = 'https://www.facebook.com/profile.php?id=' + m[1];
-        } else if (!/facebook\\.com\\//i.test(href)) {
-          continue;
+    const row = btn.closest(rowSel) || btn.parentElement;
+    let el = row || btn;
+    for (let depth = 0; depth < 18 && el; depth++) {
+      for (const a of el.querySelectorAll('a[href], [role="link"][href]')) {
+        const norm = normalizeHref(a.href || a.getAttribute('href') || '');
+        if (norm) {
+          push(norm, (row || el).innerText);
+          break;
         }
-        if (seen.has(href)) continue;
-        seen.add(href);
-        let rowText = (el.innerText || '').slice(0, 400);
-        out.push({ href, rowText });
-        break;
       }
       el = el.parentElement;
     }
@@ -425,17 +445,20 @@ async def _collect_visible_suggestion_profiles(
     """Profile URLs from visible Add Friend rows + optional inline audience count."""
     results: list[tuple[str, int | None]] = []
     seen: set[str] = set()
+    js_count = 0
+    btn_count = 0
 
     for profile_url, inline in await _collect_suggestion_profiles_js(page):
         if profile_url not in seen:
             seen.add(profile_url)
             results.append((profile_url, inline))
+            js_count += 1
 
     buttons = _add_friend_button(page)
     try:
         total = await buttons.count()
     except Exception:
-        return results
+        total = 0
     for i in range(min(total, 40)):
         btn = buttons.nth(i)
         if not await _safe_visible(btn, timeout_ms=1_200):
@@ -448,8 +471,10 @@ async def _collect_visible_suggestion_profiles(
         try:
             row_text = await btn.evaluate(
                 """(el) => {
+                    const row = el.closest('[role="listitem"], [data-visualcompletion], [data-mcomponent]');
+                    if (row && row.innerText && row.innerText.length > 15) return row.innerText;
                     let n = el;
-                    for (let i = 0; i < 14 && n; i++) {
+                    for (let i = 0; i < 18 && n; i++) {
                         if (n.innerText && n.innerText.length > 15) return n.innerText;
                         n = n.parentElement;
                     }
@@ -460,6 +485,21 @@ async def _collect_visible_suggestion_profiles(
             row_text = ""
         inline = _parse_audience_count_text(row_text or "")
         results.append((profile_url, inline))
+        btn_count += 1
+
+    if results:
+        _log.info(
+            "Suggestion profiles collected: %d (js=%d, button-walk=%d, add-friend buttons=%d)",
+            len(results),
+            js_count,
+            btn_count,
+            total,
+        )
+    elif total > 0:
+        _log.warning(
+            "Add Friend buttons=%d but no profile URLs parsed — check mobile suggestions DOM",
+            total,
+        )
     return results
 
 

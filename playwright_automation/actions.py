@@ -3258,6 +3258,26 @@ _CAPTION_TYPED_VERIFY_JS: Final[str] = """
 }
 """
 
+_CLICK_M_TEXTAREA_STUB_JS: Final[str] = """
+() => {
+  const skipRe = /what'?s on your mind|create a post|আপনার মনে কী/i;
+  const nodes = document.querySelectorAll(
+    '[data-mcomponent="TextArea"][role="button"][data-type="text"], '
+    + '[data-mcomponent="TextArea"][role="button"]'
+  );
+  for (const el of nodes) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 120 || r.height < 36) continue;
+    const t = (el.innerText || '').trim();
+    if (skipRe.test(t)) continue;
+    el.focus();
+    el.click();
+    return true;
+  }
+  return false;
+}
+"""
+
 _FOCUS_SHARE_TEXTAREA_JS: Final[str] = """
 () => {
   const inDialog = (el) => !!(el && el.closest('[role="dialog"], [aria-modal="true"]'));
@@ -3283,6 +3303,45 @@ _FOCUS_SHARE_TEXTAREA_JS: Final[str] = """
   try {
     ta.click();
   } catch (_e) {}
+  return true;
+}
+"""
+
+_SET_SHARE_CAPTION_JS: Final[str] = """
+(text) => {
+  const body = String(text || '').slice(0, 300);
+  if (!body) return false;
+  const skipRe = /what'?s on your mind|create a post|আপনার মনে কী/i;
+  const inDialog = (el) => !!(el && el.closest('[role="dialog"], [aria-modal="true"]'));
+  const score = (el) => {
+    let s = inDialog(el) ? 5 : 0;
+    if (el.tagName === 'TEXTAREA') s += 4;
+    if ((el.className || '').toString().includes('textbox')) s += 3;
+    const m = Number.parseInt(el.getAttribute('maxlength') || '', 10);
+    if (m >= 400) s += 2;
+    return s;
+  };
+  const nodes = Array.from(document.querySelectorAll(
+    'textarea.textbox, textarea[role="combobox"], textarea, [contenteditable="true"]'
+  )).filter((el) => {
+    if (skipRe.test((el.getAttribute('aria-label') || el.innerText || '') + '')) return false;
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 80 && r.height > 12 && r.top >= 30;
+  });
+  nodes.sort((a, b) => score(b) - score(a));
+  const el = nodes[0];
+  if (!el) return false;
+  el.focus();
+  try { el.click(); } catch (_e) {}
+  if (el.tagName === 'TEXTAREA') {
+    el.value = body;
+  } else {
+    el.textContent = body;
+  }
+  el.dispatchEvent(new InputEvent('input', { bubbles: true, data: body }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
   return true;
 }
 """
@@ -3335,6 +3394,25 @@ async def _share_caption_appears_typed(page: Page) -> bool:
         return bool(sample)
     except Exception:
         return False
+
+
+async def _js_set_share_caption(page: Page, text: str) -> bool:
+    """Inject caption into the best visible textarea/contenteditable (share dialog)."""
+    body = (text or "").strip()[:300]
+    if not body:
+        return False
+    try:
+        ok = await page.evaluate(_SET_SHARE_CAPTION_JS, body)
+    except Exception as exc:
+        _share_log.debug("JS set share caption failed: %s", exc)
+        return False
+    if not ok:
+        return False
+    await random_delay(0.35, 0.75)
+    if await _share_caption_appears_typed(page):
+        _share_log.info("Typed share caption via JS inject (%d chars): %r", len(body), body[:70])
+        return True
+    return False
 
 
 _FEED_COMPOSER_INNER_SKIP: Final[re.Pattern[str]] = re.compile(
@@ -3408,10 +3486,21 @@ async def _click_share_mtextarea_placeholder(page: Page) -> bool:
     return False
 
 
-async def _open_share_write_something(page: Page) -> bool:
-    """Tap the mobile share placeholder (``ServerTextArea`` / ``Write something``)."""
+async def _open_share_caption_composer(page: Page) -> bool:
+    """Open the share caption field (M TextArea stub → textarea → fallbacks)."""
+    try:
+        if await page.evaluate(_CLICK_M_TEXTAREA_STUB_JS):
+            _share_log.info("Step 3/4: Opened share caption (M TextArea JS)")
+            await random_delay(1.2, 2.2)
+            if await _locate_share_caption_input(page):
+                return True
+    except Exception as exc:
+        _share_log.debug("M TextArea JS open failed: %s", exc)
+
     if await _click_share_mtextarea_placeholder(page):
-        return True
+        await random_delay(1.0, 2.0)
+        if await _locate_share_caption_input(page):
+            return True
 
     for css in (
         'textarea.textbox[maxlength="2000"]',
@@ -3432,39 +3521,28 @@ async def _open_share_write_something(page: Page) -> bool:
         except Exception:
             continue
 
-    for loc in (
-        page.locator('[data-mcomponent="TextArea"][role="button"]').filter(
-            has_text=re.compile(r"see\s+more|write\s+something|say\s+something|লিখুন", re.I)
-        ).first,
-        page.locator('[data-mcomponent="ServerTextArea"]').first,
-        page.locator('[data-mcomponent="ServerTextArea"]').filter(
-            has_text=re.compile(r"write something|say something|কিছু লিখুন|এই সম্পর্কে", re.I)
-        ).first,
-        page.get_by_role("button", name=re.compile(r"write something|say something", re.I)).first,
-        page.locator('[role="button"]').filter(
-            has_text=re.compile(r"^write something\.?\.?\.?$|^say something", re.I)
-        ).first,
-    ):
-        try:
-            if await loc.is_visible(timeout=1_200):
-                await loc.click(timeout=4_000)
-                _share_log.info("Step 3/4: Write something — opened caption box")
-                await random_delay(0.4, 0.8)
-                return True
-        except Exception:
-            continue
     try:
         opened = await page.evaluate(_OPEN_SHARE_WRITE_SOMETHING_JS)
         if opened:
             _share_log.info("Opened share caption via JS (%s)", opened)
-            if str(opened).startswith("MTextArea"):
-                await random_delay(1.1, 2.05)
-            else:
-                await random_delay(0.4, 0.85)
-            return True
+            await random_delay(1.0, 2.0 if str(opened).startswith("MTextArea") else 0.6)
+            if await _locate_share_caption_input(page):
+                return True
     except Exception as exc:
         _share_log.debug("JS open share write-something failed: %s", exc)
+
+    try:
+        if await page.evaluate(_FOCUS_SHARE_TEXTAREA_JS):
+            await random_delay(0.5, 1.0)
+            return await _locate_share_caption_input(page) is not None
+    except Exception:
+        pass
     return False
+
+
+async def _open_share_write_something(page: Page) -> bool:
+    """Backward-compatible alias for opening the share caption composer."""
+    return await _open_share_caption_composer(page)
 
 
 async def _locate_share_caption_input(page: Page) -> Locator | None:
@@ -3474,7 +3552,26 @@ async def _locate_share_caption_input(page: Page) -> Locator | None:
         re.I,
     )
 
-    for _ in range(5):
+    for _ in range(8):
+        for sel in (
+            '[data-mcomponent="TextArea"] textarea:not([readonly])',
+            '[data-mcomponent="TextArea"] [contenteditable="true"]',
+            '[role="dialog"] textarea:not([readonly]):not([disabled])',
+            '[aria-modal="true"] textarea:not([readonly]):not([disabled])',
+        ):
+            loc = page.locator(sel)
+            try:
+                n = await loc.count()
+            except Exception:
+                n = 0
+            for i in range(min(n, 6) - 1, -1, -1):
+                cand = loc.nth(i)
+                try:
+                    if await cand.is_visible(timeout=500):
+                        return cand
+                except Exception:
+                    continue
+
         # Real field often lives under the share dialog (after M-stub opens).
         for sel in (
             '[role="dialog"] textarea:not([readonly]):not([disabled])',
@@ -3659,57 +3756,40 @@ async def _type_share_caption(page: Page, box: Locator | None, body: str) -> boo
 
 
 async def _fill_share_caption(page: Page, caption: str) -> bool:
-    """Type the share caption into the repost composer (``Write something`` / ServerTextArea)."""
+    """Type the share caption into the repost composer after Share to Facebook."""
     body = (caption or "").strip()
     if not body:
         return False
 
-    box = await _locate_share_caption_input(page)
-    if box is None:
-        opened = await _open_share_write_something(page)
-        if opened:
-            await random_delay(0.9, 1.6)
-        else:
-            try:
-                if await page.evaluate(_FOCUS_SHARE_TEXTAREA_JS):
-                    await random_delay(0.45, 0.9)
-                    opened = True
-            except Exception as exc:
-                _share_log.debug("JS textarea focus failed: %s", exc)
+    await _open_share_caption_composer(page)
 
-    for attempt in range(1, 8):
+    for attempt in range(1, 10):
         if attempt > 1:
-            await random_delay(0.4, 0.85)
-        try:
-            await page.evaluate(_FOCUS_SHARE_TEXTAREA_JS)
-        except Exception:
-            pass
+            await random_delay(0.45, 0.95)
+
+        if await _js_set_share_caption(page, body):
+            return True
+
         box = await _locate_share_caption_input(page)
-        if box is not None:
-            if await _type_share_caption(page, box, body):
-                return True
-            break
-        # Stub opened but textarea slow — one extra M-stub tap, never re-open placeholder.
-        if attempt == 3:
+        if box is not None and await _type_share_caption(page, box, body):
+            return True
+
+        if attempt in (2, 5, 8):
+            try:
+                await page.evaluate(_CLICK_M_TEXTAREA_STUB_JS)
+            except Exception:
+                pass
             await _click_share_mtextarea_placeholder(page)
-            await random_delay(0.8, 1.4)
+            await random_delay(1.0, 1.8)
+        elif attempt == 4:
+            await _open_share_caption_composer(page)
 
-    if await _share_caption_appears_typed(page):
-        return await _type_share_caption(page, None, body)
+    if await _js_set_share_caption(page, body):
+        return True
 
-    try:
-        sta = page.locator(
-            '[role="dialog"] [data-mcomponent="ServerTextArea"], '
-            '[aria-modal="true"] [data-mcomponent="ServerTextArea"]'
-        ).first
-        if await sta.is_visible(timeout=1_200):
-            await sta.click(timeout=3_000)
-            await random_delay(0.4, 0.8)
-            return await _type_share_caption(page, None, body)
-    except Exception:
-        pass
-
-    _share_log.warning("Share caption box not found (Write something / ServerTextArea)")
+    _share_log.warning(
+        "Share caption not typed — no textarea/contenteditable after Share to Facebook"
+    )
     return False
 
 

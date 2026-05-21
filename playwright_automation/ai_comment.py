@@ -21,6 +21,7 @@ import os
 import random
 import re
 import ssl
+from collections import Counter
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Final
@@ -867,20 +868,135 @@ def _season_sensitive_avoid_styles(feed_blob: str) -> list[str]:
     return []
 
 
-def _offline_status_from_feed_memory(mem: list[str], *, lang: str) -> str | None:
-    """When Ollama is down, still sound like the current feed (not random weather)."""
-    if not mem:
+_META_STATUS_RE: Final[re.Pattern[str]] = re.compile(
+    r"ফিডে|ফিড ঘুর|আজকের ফিড|feed erokom|my feed|scrolled the feed|"
+    r"feed is full|আপডেট পেলাম|how's everyone|কেমন আছো|কেমন আছ|"
+    r"ভালো দিন|good day|আলোচনা—তোমাদের|saw a lot of good updates|"
+    r"erokom post|এরকম পোস্ট|feed looks",
+    re.I,
+)
+
+
+def _status_is_meta_about_feed(text: str) -> bool:
+    return bool(_META_STATUS_RE.search(text or ""))
+
+
+def infer_trending_topics_from_feed(
+    mem: Sequence[str],
+    *,
+    max_topics: int = 5,
+) -> list[str]:
+    """Keyword frequency across recent feed snippets — what is buzzing now."""
+    counter: Counter[str] = Counter()
+    for snippet in mem:
+        cleaned = clean_post_text(snippet, max_chars=240)
+        for kw in _extract_post_keywords(cleaned, max_kw=8):
+            w = kw.lower().strip()
+            if len(w) < 3 or w in _STOPWORDS or w in _KEYWORD_UI_NOISE:
+                continue
+            counter[w] += 2
+        for tok in re.findall(r"[\w\u0980-\u09FF]{4,}", cleaned.lower()):
+            if tok in _STOPWORDS or tok in _KEYWORD_UI_NOISE:
+                continue
+            counter[tok] += 1
+    if not counter:
+        return []
+    ranked = counter.most_common(max_topics * 3)
+    strong = [w for w, c in ranked if c >= 3][:max_topics]
+    if len(strong) >= 2:
+        return strong
+    medium = [w for w, c in ranked if c >= 2][:max_topics]
+    if medium:
+        return medium
+    return [w for w, _ in ranked[:max_topics]]
+
+
+def _style_from_trending_topics(topics: list[str]) -> str:
+    blob = " ".join(topics).lower()
+    if any(x in blob for x in ("cricket", "football", "match", "খেলা", "ক্রিকেট", "goal", "ম্যাচ", "sports")):
+        return "sports"
+    if any(x in blob for x in ("rain", "weather", "বৃষ্টি", "আবহাওয়া", "কুয়াশা", "winter", "storm")):
+        return "weather"
+    if any(x in blob for x in ("food", "recipe", "রান্না", "খাবার", "biryani", "restaurant")):
+        return "food"
+    if any(x in blob for x in ("phone", "laptop", "tech", "ai", "app", "ফোন", "গ্যাজেট")):
+        return "tech"
+    if any(x in blob for x in ("family", "wedding", "বিয়ে", "মা", "বাবা", "baby", "শিশু")):
+        return "family"
+    if any(x in blob for x in ("travel", "trip", "ভ্রমণ", "flight", "hotel")):
+        return "nature"
+    return "question"
+
+
+def _status_relates_to_topics(text: str, topics: list[str]) -> bool:
+    if not topics:
+        return True
+    low = (text or "").lower()
+    for topic in topics:
+        if topic in low:
+            return True
+        if comment_seems_relevant(text, topic):
+            return True
+    return False
+
+
+def _accept_status_post(
+    text: str,
+    *,
+    topics: list[str],
+    lang: str,
+    feed_blob: str,
+) -> bool:
+    if not text or len(text.strip()) < 8:
+        return False
+    if _status_is_meta_about_feed(text):
+        return False
+    if comment_is_too_generic(text, feed_blob or ("x" * 60)):
+        return False
+    probe = "আ" if lang == "bn" else "Hello"
+    if not comment_matches_post_language(text, probe):
+        return False
+    if topics and not _status_relates_to_topics(text, topics):
+        return False
+    return True
+
+
+def _offline_trending_status(topics: list[str], *, lang: str) -> str | None:
+    """Opinion on inferred trends — never 'my feed looks like this'."""
+    if not topics:
         return None
-    blob = clean_post_text(" ".join(mem[-8:]), max_chars=520)
-    kws = [k for k in _extract_post_keywords(blob, max_kw=5) if k and len(k) > 1]
+    t0, t1 = topics[0], topics[1] if len(topics) > 1 else None
     if lang == "bn":
-        if kws:
-            lead = " / ".join(kws[:3])
-            return f"ফিডে {lead} নিয়েই এখন আলোচনা—তোমাদের কী মনে হচ্ছে?"
-        return "ফিড ঘুরতে গিয়ে বেশ কিছু আপডেট পেলাম—সবাই কেমন আছো?"
-    if kws:
-        return f"My feed is full of {' / '.join(kws[:3])} right now — what's on your mind?"
-    return "Scrolled the feed and saw a lot of good updates — how's everyone doing?"
+        if t1:
+            opts = (
+                f"{t0} আর {t1}—দুটোই আজ মাথায় ঘুরছে, তোমরা কোনটা বেশি follow করছ?",
+                f"{t0} নিয়ে যা চলছে তার পাশাপাশি {t1}—তোমাদের কোনটা বেশি interesting?",
+                f"{t0} আর {t1} নিয়ে আজকের হট টেক—আমার মনে হয় দুটোই share-worthy।",
+            )
+        else:
+            opts = (
+                f"{t0} নিয়ে আজ সবাই যেটা বলছে—আমার মনে হয় এটাই এখন সবচেয়ে গরম বিষয়।",
+                f"{t0} নিয়ে একটা ছোট অভিমত: যতটা হট হচ্ছে, ততটাই মনে হচ্ছে সবাই একই দিকে।",
+                f"{t0}—এটা নিয়ে তোমরা কী ভাবছ? আমার কাছে বেশ জোরালো লাগছে।",
+            )
+        return random.choice(opts)
+    if t1:
+        opts = (
+            f"Between {t0} and {t1} — both are blowing up today. Which side are you on?",
+            f"{t0} and {t1} are the hot takes right now — curious what you all think.",
+        )
+    else:
+        opts = (
+            f"Everyone's talking about {t0} today — feels like the loudest topic right now.",
+            f"My take on {t0}: it's getting way more traction than I expected.",
+            f"What's your read on {t0}? Seems like the main conversation today.",
+        )
+    return random.choice(opts)
+
+
+def _offline_status_from_feed_memory(mem: list[str], *, lang: str) -> str | None:
+    topics = infer_trending_topics_from_feed(mem)
+    return _offline_trending_status(topics, lang=lang)
 
 
 def pick_status_post_style(*, avoid: list[str] | None = None) -> str:
@@ -900,13 +1016,12 @@ async def generate_status_post(
     feed_memory_snippets: Sequence[str] | None = None,
 ) -> tuple[str, str]:
     """
-    Varied short status for the feed composer.
+    Short status for the feed composer.
 
-    When ``feed_memory_snippets`` is set (recent visible post texts from scrolling),
-    the model is steered toward **current feed topics** and away from contradictory
-    seasonal fluff.
+    With ``feed_memory_snippets``, infers **trending topics** from what was read
+    while scrolling and writes an original take — never “আজকের ফিড এরকম” meta posts.
 
-    Returns ``(text, style_key)`` — style rotates (food, sports, family, etc.).
+    Returns ``(text, style_key)``; ``("", "skip")`` when feed memory is too thin.
     """
     import asyncio
 
@@ -915,112 +1030,161 @@ async def generate_status_post(
         for m in (feed_memory_snippets or ())
         if m and len(m.strip()) > 15
     ][-22:]
-    feed_blob = "\n".join(mem)
+    feed_blob = clean_post_text("\n".join(mem), max_chars=900)
     season_extra = _season_sensitive_avoid_styles(feed_blob)
-    merged_avoid = list(
-        dict.fromkeys([*(avoid_styles or []), *season_extra])
-    )
+    merged_avoid = list(dict.fromkeys([*(avoid_styles or []), *season_extra]))
 
     use_bn = prefer_bn if prefer_bn is not None else random.random() < 0.55
     lang = "bn" if use_bn else "en"
-    style = pick_status_post_style(avoid=merged_avoid)
-    pool = _STATUS_STYLES[style][lang]
-    fallback = random.choice(pool)
     dhaka = _dhaka_now_line()
 
-    style_hints_bn = {
-        "weather": "আবহাওয়া/মৌসুম",
-        "food": "খাবার বা রান্না",
-        "family": "পরিবার বা প্রিয়জন",
-        "work": "কাজ বা পড়াশোনা",
-        "weekend": "ছুটি বা আড্ডা",
-        "gratitude": "কৃতজ্ঞতা",
-        "sports": "খেলা/ক্রিকেট/ফুটবল",
-        "tech": "টেক/গ্যাজেট",
-        "question": "বন্ধুদের হালকা প্রশ্ন",
-        "memory": "স্মৃতি/নস্টালজিয়া",
-        "nature": "প্রকৃতি/ভ্রমণ",
-    }
-    style_hints_en = {
-        "weather": "weather or season",
-        "food": "food or cooking",
-        "family": "family or loved ones",
-        "work": "work or study",
-        "weekend": "weekend plans",
-        "gratitude": "gratitude",
-        "sports": "sports or match",
-        "tech": "tech or gadgets",
-        "question": "a light question to friends",
-        "memory": "a memory or nostalgia",
-        "nature": "nature or outdoors",
-    }
-    hint = style_hints_bn.get(style, style) if use_bn else style_hints_en.get(style, style)
-    avoid_txt = ", ".join(merged_avoid) or "none"
+    if mem and len(mem) < 3:
+        logger.warning(
+            "Status post skipped: only %d feed snippets (need ≥3 after scrolling)",
+            len(mem),
+        )
+        return "", "skip"
 
     if mem:
-        bullets = "\n".join(f"- {clean_post_text(s, max_chars=140)}" for s in mem[-14:])
-        if use_bn:
-            topic_tail = (
-                "ফিডে তুমি যা যা দেখছ (স্নিপেট উপরে), তার সাথে **সাদৃশ্যপূর্ণ** একটা ছোট স্ট্যাটাস লেখো—"
-                "নতুন টেক্সট, ক্লিশে না। ফিডে না থাকা ভুল মৌসুম/আবহাওয়া বর্ণনা করবে না।"
-            )
-            user = (
-                f"বর্তমান সময় (ঢাকা): {dhaka or '(অজানা)'}\n"
-                f"ফিড থেকে সংক্ষেপিত পড়া:\n{bullets}\n\n"
-                f"{topic_tail}\n"
-                f"(ঐচ্ছিক টোন সংকেত: {hint}; আগের স্টাইল এড়াও: {avoid_txt})। "
-                "সরাসরি একটিমাত্র লাইন লেখো (১২০ অক্ষরের নিচে)। হ্যাশট্যাগ নয়।"
-            )
-        else:
-            topic_tail = (
-                "Mirror the FEED CONTEXT above — same themes people are buzzing about — "
-                "with your **own wording**. Do NOT invent wrong-season weather that contradicts reality."
-            )
-            user = (
-                f"Local time hint (Dhaka): {dhaka or 'unknown'}\n"
-                f"Things recently visible on their feed:\n{bullets}\n\n"
-                f"{topic_tail}\n"
-                f"(Optional tone cue: {hint}; avoid stale styles: {avoid_txt}). "
-                "Exactly one short sentence, ≤120 chars, no hashtags."
-            )
+        topics = infer_trending_topics_from_feed(mem)
+        if not topics:
+            logger.warning("Status post skipped: could not infer trending topics from feed")
+            return "", "skip"
+        style = _style_from_trending_topics(topics)
+        if style in merged_avoid:
+            style = "question"
+        topics_line = ", ".join(topics[:4])
+        fed_off = _offline_trending_status(topics, lang=lang)
+        bullets = "\n".join(f"- {clean_post_text(s, max_chars=120)}" for s in mem[-10:])
+        ban_meta = (
+            "ফিড/feed/scroll/আজকের ফিড/erokom/আপডেট পেলাম/কেমন আছো/ভালো দিন লিখবে না। "
+            if use_bn
+            else "Do NOT mention feed, scrolling, 'my feed', good day, or how posts look. "
+        )
         if use_bn:
             system = (
                 "তুমি Facebook-এ মানুষের মতো স্ট্যাটাস লেখো। "
-                "ফিডে যা ফোকাস করা হয়েছে তার সাথে **মিল রাখাটাই গুরুত্বপূর্ণ**। "
-                "বাংলায়। ১–২ বাক্য, সর্বোচ্চ ১২০ অক্ষর। হ্যাশট্যাগ নয়। কটুক্তি/রাজনীতি নয়। "
-                "শুধু পোস্ট টেক্সট।"
+                "নিচের ট্রেন্ডিং বিষয়গুলো নিয়ে **নিজের মতামত, প্রশ্ন বা ছোট পর্যবেক্ষণ** লেখো—"
+                "ফিড বর্ণনা নয়। বাংলায়। ১ বাক্য, সর্বোচ্চ ১২০ অক্ষর। হ্যাশট্যাগ নয়। "
+                "কটুক্তি/রাজনীতি নয়। শুধু পোস্ট টেক্সট।"
+            )
+            user = (
+                f"ঢাকা সময়: {dhaka or '(অজানা)'}\n"
+                f"ট্রেন্ডিং বিষয় (ফিড থেকে বোঝা): {topics_line}\n"
+                f"প্রসঙ্গ স্নিপেট:\n{bullets}\n\n"
+                f"{ban_meta}"
+                "ট্রেন্ডিং বিষয়ের কোনো একটি বা দুটি ব্যবহার করে নতুন লাইন লেখো। "
+                "ভুল মৌসুম/আবহাওয়া উদ্ভাবনা করবে না।"
             )
         else:
             system = (
-                "You write natural Facebook statuses. The feed context is **authoritative**: "
-                "stay on those topics / vibe. English only. 1–2 sentences, max 120 chars. "
-                "No hashtags. No politics."
-            )
-    else:
-        if use_bn:
-            _bd_now = dhaka or "স্থানীয় সময় অজানা"
-            system = (
-                "তুমি Facebook-এ মানুষের মতো **বিভিন্ন ধরনের** ছোট স্ট্যাটাস লেখো। "
-                "প্রতিবার আলাদা টপিক ও ভাব। শুধু বাংলায়। ১–২ বাক্য, সর্বোচ্চ ১২০ অক্ষর। "
-                "হ্যাশট্যাগ নয়। কটুক্তি/রাজনীতি নয়। শুধু পোস্ট টেক্সট। "
-                f"(বাস্তব সময় সংকেত: এখন {_bd_now}। বাস্তবতার সাথে বিরোধপূর্ণ মৌসুম লিখবে না।)"
+                "You write natural Facebook statuses about **trending topics** — "
+                "your opinion or question, not a description of the feed. "
+                "English only. One sentence, max 120 chars. No hashtags. No politics."
             )
             user = (
-                f"এবারের টপিক টোন: {hint}। আগের স্টাইল এড়াও: {avoid_txt}। "
-                "সাধারণ 'ভালো দিন' টাইপ ক্লিশে লিখবে না। নতুন কিছু লেখো।"
+                f"Time (Dhaka): {dhaka or 'unknown'}\n"
+                f"Inferred trending topics: {topics_line}\n"
+                f"Context snippets:\n{bullets}\n\n"
+                f"{ban_meta}"
+                "Use at least one trending topic in fresh wording."
             )
-        else:
-            system = (
-                "You write varied Facebook status posts — different topic and tone each time. "
-                "English only. 1–2 sentences, max 120 chars. No hashtags. No politics. "
-                f"Time cue (Dhaka): {dhaka or 'unknown'} — avoid seasonal mismatch."
+        retry_user = (
+            user
+            + (
+                "\n\nপূর্ববর্তী উত্তর ফিড বর্ণনা করেছিল—এবার শুধু ট্রেন্ডিং বিষয়ে মতামত লেখো।"
+                if use_bn
+                else "\n\nPrevious answer described the feed — now only an opinion on a trending topic."
             )
-            user = (
-                f"Topic for this post: {hint}. Avoid repeating these recent styles: {avoid_txt}. "
-                "Do NOT write another generic 'good day' post — be specific."
-            )
+        )
 
-    fed_off = _offline_status_from_feed_memory(mem, lang=lang)
+        async def _ollama_once(prompt_user: str) -> str | None:
+            from playwright_automation.brain import _chat, _default_model
+
+            raw = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _chat,
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": prompt_user},
+                    ],
+                    model=_default_model(),
+                    format_json=False,
+                ),
+                timeout=timeout,
+            )
+            text = (raw or "").strip().strip('"').strip("'")
+            if text and _accept_status_post(
+                text, topics=topics, lang=lang, feed_blob=feed_blob
+            ):
+                return text[:120]
+            return None
+
+        try:
+            text = await _ollama_once(user)
+            if not text:
+                text = await _ollama_once(retry_user)
+            if text:
+                logger.info(
+                    "Trending status from Ollama (%s, topics=%s): %r",
+                    lang,
+                    topics_line[:60],
+                    text[:80],
+                )
+                return text, style
+        except Exception as exc:
+            logger.debug("Ollama trending status failed: %s", exc)
+
+        if fed_off and _accept_status_post(
+            fed_off, topics=topics, lang=lang, feed_blob=feed_blob
+        ):
+            logger.info("Trending offline status (%s): %r", lang, fed_off[:80])
+            return fed_off[:120], style
+        if fed_off:
+            logger.info("Trending offline status (relaxed, %s): %r", lang, fed_off[:80])
+            return fed_off[:120], style
+        return "", "skip"
+
+    style = pick_status_post_style(avoid=merged_avoid)
+    pool = _STATUS_STYLES[style][lang]
+    fallback = random.choice(pool)
+    style_hints_bn = {
+        "weather": "আবহাওয়া/মৌসুম",
+        "food": "খাবার বা রান্না",
+        "family": "পরিবার",
+        "work": "কাজ",
+        "weekend": "ছুটি",
+        "gratitude": "কৃতজ্ঞতা",
+        "sports": "খেলা",
+        "tech": "টেক",
+        "question": "প্রশ্ন",
+        "memory": "স্মৃতি",
+        "nature": "প্রকৃতি",
+    }
+    style_hints_en = {
+        "weather": "weather",
+        "food": "food",
+        "family": "family",
+        "work": "work",
+        "weekend": "weekend",
+        "gratitude": "gratitude",
+        "sports": "sports",
+        "tech": "tech",
+        "question": "question",
+        "memory": "memory",
+        "nature": "nature",
+    }
+    hint = style_hints_bn.get(style, style) if use_bn else style_hints_en.get(style, style)
+    avoid_txt = ", ".join(merged_avoid) or "none"
+    if use_bn:
+        system = (
+            "তুমি Facebook-এ মানুষের মতো ছোট স্ট্যাটাস লেখো। বাংলায়। "
+            "১–২ বাক্য, সর্বোচ্চ ১২০ অক্ষর। হ্যাশট্যাগ নয়।"
+        )
+        user = f"টোন: {hint}। এড়াও: {avoid_txt}। নতুন কিছু লেখো।"
+    else:
+        system = "You write varied Facebook statuses. English. Max 120 chars."
+        user = f"Topic: {hint}. Avoid: {avoid_txt}."
 
     try:
         from playwright_automation.brain import _chat, _default_model
@@ -1036,16 +1200,11 @@ async def generate_status_post(
         )
         text = (raw or "").strip().strip('"').strip("'")
         if text and comment_matches_post_language(text, "আ" if use_bn else "Hello"):
-            logger.info("Status from Ollama (%s, style=%s): %r", lang, style, text[:80])
             return text[:120], style
     except Exception as exc:
         logger.debug("Ollama status failed: %s", exc)
 
-    if fed_off:
-        logger.info("Using feed-aware offline status (%s): %r", lang, fed_off[:80])
-        return fed_off[:120], "question" if "?" in fed_off else style
-
-    logger.info("Using offline %s status fallback (style=%s)", lang, style)
+    logger.info("Using offline %s status (no feed memory, style=%s)", lang, style)
     return fallback, style
 
 
