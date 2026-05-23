@@ -908,7 +908,10 @@ def infer_trending_topics_from_feed(
     medium = [w for w, c in ranked if c >= 2][:max_topics]
     if medium:
         return medium
-    return [w for w, _ in ranked[:max_topics]]
+    weak = [w for w, c in ranked if c >= 1][:max_topics]
+    if weak:
+        return weak
+    return []
 
 
 def _style_from_trending_topics(topics: list[str]) -> str:
@@ -1038,9 +1041,9 @@ async def generate_status_post(
     lang = "bn" if use_bn else "en"
     dhaka = _dhaka_now_line()
 
-    if mem and len(mem) < 3:
+    if mem and len(mem) < 2:
         logger.warning(
-            "Status post skipped: only %d feed snippets (need ≥3 after scrolling)",
+            "Status post skipped: only %d feed snippets (need ≥2 after scrolling)",
             len(mem),
         )
         return "", "skip"
@@ -1048,8 +1051,16 @@ async def generate_status_post(
     if mem:
         topics = infer_trending_topics_from_feed(mem)
         if not topics:
+            blob = clean_post_text(" ".join(mem[-6:]), max_chars=420)
+            topics = [
+                k
+                for k in _extract_post_keywords(blob, max_kw=5)
+                if k and len(k) > 2
+            ][:4]
+        if not topics:
             logger.warning("Status post skipped: could not infer trending topics from feed")
             return "", "skip"
+        logger.info("Trending topics from feed memory: %s", ", ".join(topics[:4]))
         style = _style_from_trending_topics(topics)
         if style in merged_avoid:
             style = "question"

@@ -41,17 +41,21 @@ from playwright_automation.agent_executor import (  # noqa: E402
     browse_feed_warmup,
     force_feed_comment,
     friends_remaining_today,
+    posts_remaining_today,
     refresh_friend_quota_day,
+    refresh_post_quota_day,
     run_daily_friend_send_phase,
+    run_daily_status_post_phase,
     run_structured_cycle,
     shares_remaining_today,
     _share_one_to_own_timeline,
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-21-friend-ollama-v30"
+_AGENT_BUILD = "2026-05-22-daily-trending-posts-v31"
 _DAILY_SHARE_STATE = "daily_share_quota.json"
 _DAILY_FRIEND_STATE = "daily_friend_quota.json"
+_DAILY_POST_STATE = "daily_post_quota.json"
 from playwright_automation.bot_core import BaseBot  # noqa: E402
 from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E402
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
@@ -184,6 +188,60 @@ def _save_daily_friend_state(profile_dir: Path, session) -> None:
         log.debug("Could not persist daily friend state: %s", exc)
 
 
+def _load_daily_post_state(profile_dir: Path) -> tuple[str, int, int]:
+    path = profile_dir / _DAILY_POST_STATE
+    if not path.is_file():
+        return "", 0, 0
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return (
+            str(data.get("day", "")),
+            int(data.get("posts_today", 0)),
+            int(data.get("daily_post_target", 0)),
+        )
+    except Exception:
+        return "", 0, 0
+
+
+def _save_daily_post_state(profile_dir: Path, session) -> None:
+    refresh_post_quota_day(session)
+    path = profile_dir / _DAILY_POST_STATE
+    try:
+        path.write_text(
+            json.dumps(
+                {
+                    "day": session.post_quota_day,
+                    "posts_today": session.posts_today,
+                    "daily_post_target": session.daily_post_target,
+                    "daily_post_min": session.daily_post_min,
+                    "daily_post_max": session.daily_post_max,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        log.debug("Could not persist daily post state: %s", exc)
+
+
+def _apply_daily_post_state(session, profile_dir: Path) -> None:
+    from datetime import date
+
+    day, posted, target = _load_daily_post_state(profile_dir)
+    today = date.today().isoformat()
+    refresh_post_quota_day(session)
+    if day == today:
+        session.posts_today = posted
+        if target > 0:
+            session.daily_post_target = target
+        log.info(
+            "Loaded daily posts: %d/%d today (target %d, trending from feed memory)",
+            session.posts_today,
+            session.daily_post_target,
+            session.daily_post_target,
+        )
+
+
 def _apply_daily_friend_state(session, profile_dir: Path) -> None:
     from datetime import date
 
@@ -229,18 +287,23 @@ async def _agent_loop(
     profile_dir: Path,
     daily_friend_min: int,
     daily_friend_max: int,
+    daily_post_min: int,
+    daily_post_max: int,
 ) -> None:
     from playwright_automation.agent_executor import browse_feed_warmup, ingest_feed_memory_from_viewport
 
     session = AgentSession()
     session.daily_friend_min = daily_friend_min
     session.daily_friend_max = daily_friend_max
+    session.daily_post_min = daily_post_min
+    session.daily_post_max = daily_post_max
     if mode == "brain":
         from playwright_automation.brain import ollama_is_available
 
         session.ollama_available = ollama_is_available()
     _apply_daily_share_state(session, profile_dir)
     _apply_daily_friend_state(session, profile_dir)
+    _apply_daily_post_state(session, profile_dir)
     rng0 = random.Random()
     if not session.feed_pre_warmed:
         ws = min(max(feed_warmup_segments, 4), 8)
@@ -281,6 +344,7 @@ async def _agent_loop(
             )
             _save_daily_share_state(profile_dir, session)
             _save_daily_friend_state(profile_dir, session)
+            _save_daily_post_state(profile_dir, session)
         else:
             log.info("======== Starting brain cycle #%d (Ollama llama3.1) ========", cycle_num)
             session.comments_this_session = 0
@@ -310,6 +374,14 @@ async def _agent_loop(
                     session.daily_friend_target,
                 )
             await ingest_feed_memory_from_viewport(page, session)
+            if posts_remaining_today(session) > 0:
+                await run_daily_status_post_phase(bot, page, session, rng=rng)
+            elif session.posts_today >= session.daily_post_target:
+                log.info(
+                    "Brain cycle: daily post goal done (%d/%d)",
+                    session.posts_today,
+                    session.daily_post_target,
+                )
             await force_feed_comment(page, session)
             if shares_remaining_today(session, min_daily_shares) > 0:
                 await _share_one_to_own_timeline(
@@ -323,31 +395,6 @@ async def _agent_loop(
                     break
                 if step_i == 0:
                     await force_feed_comment(page, session)
-                if step_i == steps_per_burst - 1 and "create_post" not in session.recent_actions[-20:]:
-                    from playwright_automation.agent_brain import AgentActionData, AgentDecision
-                    from playwright_automation.agent_executor import execute_agent_decision
-                    from playwright_automation.ai_comment import generate_status_post
-
-                    await ingest_feed_memory_from_viewport(page, session, limit=18)
-                    post_text, _style = await generate_status_post(
-                        avoid_styles=session.recent_post_styles[-6:],
-                        feed_memory_snippets=session.feed_memory_snippets[-22:],
-                    )
-                    if not post_text.strip() or _style == "skip":
-                        log.warning("Brain: skipped status — trending topics not ready")
-                        continue
-                    post_decision = AgentDecision(
-                        thought_process="Scheduled own status post for natural activity.",
-                        location="newsfeed",
-                        action="create_post",
-                        target_url=None,
-                        action_data=AgentActionData(
-                            post_content=post_text,
-                        ),
-                    )
-                    await execute_agent_decision(bot, page, post_decision, session)
-                    await random_delay(2.0, 4.0)
-                    continue
                 decision = await agent_step(bot, page, session)
                 log.info(
                     "Step | action=%s | location=%s | %s",
@@ -365,6 +412,7 @@ async def _agent_loop(
                 )
             _save_daily_share_state(profile_dir, session)
             _save_daily_friend_state(profile_dir, session)
+            _save_daily_post_state(profile_dir, session)
 
         gap = random.uniform(min_pause, max_pause)
         log.info("Pause %.1fs before next cycle", gap)
@@ -489,10 +537,11 @@ async def _run(args: argparse.Namespace) -> None:
                 log.info("brain cycle: feed only (--skip-friends)")
             else:
                 log.info(
-                    "brain cycle: daily friend send %d–%d/day (≥%d) | Ollama steps=%d",
+                    "brain cycle: friend %d–%d/day | trending posts %d–%d/day | Ollama steps=%d",
                     args.daily_friend_min,
                     args.daily_friend_max,
-                    DEFAULT_MIN_AUDIENCE,
+                    args.daily_post_min,
+                    args.daily_post_max,
                     args.steps_per_burst,
                 )
         await _agent_loop(
@@ -520,6 +569,8 @@ async def _run(args: argparse.Namespace) -> None:
             profile_dir=profile_dir,
             daily_friend_min=args.daily_friend_min,
             daily_friend_max=args.daily_friend_max,
+            daily_post_min=args.daily_post_min,
+            daily_post_max=args.daily_post_max,
         )
     except asyncio.CancelledError:
         log.info("Agent interrupted — browser stays open until you close the tab.")
@@ -581,6 +632,18 @@ def main() -> None:
         type=int,
         default=5,
         help="Max friend requests to send per calendar day (random target between min and max each day)",
+    )
+    p.add_argument(
+        "--daily-post-min",
+        type=int,
+        default=3,
+        help="Min trending status posts per day (from feed memory context)",
+    )
+    p.add_argument(
+        "--daily-post-max",
+        type=int,
+        default=5,
+        help="Max trending status posts per day",
     )
     p.add_argument(
         "--max-friend-send",

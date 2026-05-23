@@ -146,6 +146,11 @@ class AgentSession:
     daily_friend_target: int = 5
     daily_friend_min: int = 4
     daily_friend_max: int = 5
+    posts_today: int = 0
+    post_quota_day: str = ""
+    daily_post_target: int = 4
+    daily_post_min: int = 3
+    daily_post_max: int = 5
 
 
 def _today_key() -> str:
@@ -173,6 +178,106 @@ def refresh_friend_quota_day(session: AgentSession) -> None:
 def friends_remaining_today(session: AgentSession) -> int:
     refresh_friend_quota_day(session)
     return max(0, session.daily_friend_target - session.friends_sent_today)
+
+
+def refresh_post_quota_day(session: AgentSession) -> None:
+    """Reset daily status-post counter; pick a new 3–5 target when the day rolls over."""
+    key = _today_key()
+    if session.post_quota_day != key:
+        session.post_quota_day = key
+        session.posts_today = 0
+        lo = max(1, int(session.daily_post_min))
+        hi = max(lo, int(session.daily_post_max))
+        session.daily_post_target = random.randint(lo, hi)
+        _log.info(
+            "New day — daily status-post target=%d (range %d–%d, trending from feed memory)",
+            session.daily_post_target,
+            lo,
+            hi,
+        )
+
+
+def posts_remaining_today(session: AgentSession) -> int:
+    refresh_post_quota_day(session)
+    return max(0, session.daily_post_target - session.posts_today)
+
+
+async def run_daily_status_post_phase(
+    bot: BaseBot,
+    page: Page,
+    session: AgentSession,
+    *,
+    rng: random.Random | None = None,
+) -> bool:
+    """
+    Publish one trending-topic status if today's quota (default 3–5/day) is not met.
+
+    Scrolls feed, ingests post text into ``feed_memory_snippets``, infers topics, posts.
+    """
+    from playwright_automation.ai_comment import generate_status_post, infer_trending_topics_from_feed
+
+    remaining = posts_remaining_today(session)
+    if remaining <= 0:
+        _log.info(
+            "Daily status posts complete (%d/%d today)",
+            session.posts_today,
+            session.daily_post_target,
+        )
+        return False
+
+    rng = rng or random.Random()
+    _log.info(
+        "Status post phase: %d/%d today (reading feed for trending context)",
+        session.posts_today,
+        session.daily_post_target,
+    )
+    await recover_until_feed(page, log=_log, max_steps=2, reason="daily status post")
+    await click_feed_tab(page, log=_log)
+    await random_delay(1.0, 2.0)
+
+    for pass_i in range(4):
+        await human_scroll(page, segments=rng.randint(2, 5))
+        await ingest_feed_memory_from_viewport(page, session, limit=20)
+        await random_delay(0.7, 1.3)
+        if pass_i in (0, 3):
+            mem = _recent_feed_memory_blob(session)
+            topics = infer_trending_topics_from_feed(mem) if mem else []
+            _log.info(
+                "Feed memory pass %d: %d snippets, trending=%s",
+                pass_i + 1,
+                len(mem),
+                ", ".join(topics[:4]) if topics else "(none yet)",
+            )
+
+    mem = _recent_feed_memory_blob(session)
+    draft, style = await generate_status_post(
+        avoid_styles=session.recent_post_styles[-6:],
+        feed_memory_snippets=mem,
+    )
+    if not draft.strip() or style == "skip":
+        _log.warning(
+            "Status post skipped — need more feed text (memory=%d snippets)",
+            len(mem),
+        )
+        return False
+
+    ok = await create_feed_post(page, draft)
+    if ok:
+        session.posts_today += 1
+        session.posts_this_session += 1
+        session.recent_post_styles.append(style)
+        session.recent_actions.append("create_post")
+        _log.info(
+            "Published trending status (%s): %r — today %d/%d",
+            style,
+            draft[:80],
+            session.posts_today,
+            session.daily_post_target,
+        )
+    else:
+        _log.warning("Status post composer failed")
+    await random_delay(2.0, 4.0)
+    return ok
 
 
 async def run_daily_friend_send_phase(
@@ -674,9 +779,16 @@ async def execute_agent_decision(
             return False
         ok = await create_feed_post(page, draft)
         if ok:
+            refresh_post_quota_day(session)
+            session.posts_today += 1
             session.posts_this_session += 1
             session.recent_actions.append("create_post")
-            _log.info("create_post: published %r", draft[:80])
+            _log.info(
+                "create_post: published %r (today %d/%d)",
+                draft[:80],
+                session.posts_today,
+                session.daily_post_target,
+            )
         else:
             _log.warning("create_post: composer/submit failed")
         await random_delay(2.0, 4.0)
@@ -1065,31 +1177,8 @@ async def run_structured_cycle(
     if shares_remaining_today(session, min_daily_shares) <= 0:
         _log.info("Daily share goal reached (%d/%d)", session.shares_today, min_daily_shares)
 
-    _log.info("======== Phase %s: Own status post ========", post_phase)
-    await recover_until_feed(page, log=_log, max_steps=2, reason="own status post")
-    await click_feed_tab(page, log=_log)
-    try:
-        await page.evaluate("() => window.scrollTo(0, 0)")
-    except Exception:
-        pass
-    await random_delay(1.5, 2.5)
-    await human_scroll(page, segments=rng.randint(2, 4))
-    await ingest_feed_memory_from_viewport(page, session, limit=18)
-    await human_scroll(page, segments=rng.randint(1, 3))
-    await ingest_feed_memory_from_viewport(page, session, limit=18)
-    status, style = await generate_status_post(
-        avoid_styles=session.recent_post_styles[-6:],
-        feed_memory_snippets=_recent_feed_memory_blob(session),
-    )
-    if not status.strip() or style == "skip":
-        _log.warning("Status post skipped — read more feed before posting")
-    elif await create_feed_post(page, status):
-        session.posts_this_session += 1
-        session.recent_post_styles.append(style)
-        session.recent_actions.append("create_post")
-        _log.info("Published status (%s): %r", style, status[:80])
-    else:
-        _log.warning("Status post failed this cycle")
+    _log.info("======== Phase %s: Own status post (daily 3–5, trending) ========", post_phase)
+    await run_daily_status_post_phase(bot, page, session, rng=rng)
 
     session.last_action = "scroll"
     _log.info(
