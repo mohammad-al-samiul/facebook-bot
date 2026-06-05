@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import random
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import BrowserContext, Locator, Page, Playwright, async_playwright
+from playwright.async_api import BrowserContext, Error as PlaywrightError, Locator, Page, Playwright, async_playwright
 
 from playwright_automation import actions, facebook_graph
 from playwright_automation.actions import ReactionType
+from playwright_automation.browser_profile import prepare_persistent_profile
 from playwright_automation.facebook_graph import (
     DEFAULT_MIN_AUDIENCE,
     DEFAULT_MIN_FRIENDS,
@@ -18,6 +21,8 @@ from playwright_automation.facebook_graph import (
 )
 from playwright_automation.stealth_config import StealthBundle, apply_stealth_to_context, build_stealth
 from playwright_automation.user_agent_rotation import UserAgentRotator
+
+_log = logging.getLogger(__name__)
 
 
 class BaseBot:
@@ -177,10 +182,12 @@ class BaseBot:
         profile_stalk_min_appeal: float | None = None,
         profile_stalk_use_ollama: bool | None = None,
         return_to_feed_after: bool = True,
+        min_send_goal: int = 0,
+        random_stalk_min: int | None = None,
+        random_stalk_max: int | None = None,
     ) -> int:
         """
-        Open suggestions, light-scroll to collect IDs, stalk 2–4 profiles (~1–2 min browse),
-        send requests when friends/followers ≥ threshold (default from env, 2000).
+        Open suggestions, light-scroll, random row stalk, send when audience >= threshold.
         """
         kwargs: dict = {
             "min_friends": min_friends,
@@ -203,7 +210,12 @@ class BaseBot:
             kwargs["profile_stalk_min_appeal"] = profile_stalk_min_appeal
         if profile_stalk_use_ollama is not None:
             kwargs["profile_stalk_use_ollama"] = profile_stalk_use_ollama
+        if random_stalk_min is not None:
+            kwargs["random_stalk_min"] = random_stalk_min
+        if random_stalk_max is not None:
+            kwargs["random_stalk_max"] = random_stalk_max
         kwargs["return_to_feed_after"] = return_to_feed_after
+        kwargs["min_send_goal"] = min_send_goal
         return await facebook_graph.send_friend_requests_from_suggestions(
             self.context,
             page=page,
@@ -280,29 +292,57 @@ class BaseBot:
             "args": [
                 "--disable-blink-features=AutomationControlled",
                 "--webrtc-ip-handling=disable_non_proxied_udp",
+                "--no-first-run",
+                "--no-default-browser-check",
             ],
         }
         if self._channel:
             launch_kwargs["channel"] = self._channel
         launch_kwargs.update(self._extra_context_kwargs)
 
-
-
-        ctx = await pw.chromium.launch_persistent_context(
-            str(self._user_data_dir),
-            **launch_kwargs,
-        )
-        self._context = ctx
+        last_exc: Exception | None = None
+        for attempt in range(1, 4):
+            force_kill = attempt > 1
+            await prepare_persistent_profile(self._user_data_dir, force_kill=force_kill)
+            try:
+                ctx = await pw.chromium.launch_persistent_context(
+                    str(self._user_data_dir),
+                    **launch_kwargs,
+                )
+                self._context = ctx
+                break
+            except PlaywrightError as exc:
+                last_exc = exc
+                _log.warning(
+                    "Browser launch attempt %d/3 failed: %s",
+                    attempt,
+                    exc,
+                )
+                if attempt < 3:
+                    await asyncio.sleep(1.0 + attempt * 0.5)
+            except Exception as exc:
+                last_exc = exc
+                _log.warning("Browser launch attempt %d/3 failed: %s", attempt, exc)
+                if attempt < 3:
+                    await asyncio.sleep(1.0 + attempt * 0.5)
+        else:
+            await pw.stop()
+            self._playwright = None
+            self._stealth_bundle = None
+            raise PlaywrightError(
+                f"Could not launch Chromium after 3 attempts (profile: {self._user_data_dir}). "
+                f"Last error: {last_exc}"
+            ) from last_exc
 
         # Inject cookies if we have them (no file state was loaded)
         if self._cookies and not (self._storage_state_path and self._storage_state_path.is_file()):
             try:
-                await ctx.add_cookies(self._cookies)
+                await self._context.add_cookies(self._cookies)
             except Exception as exc:
-                print(f"[BaseBot] Warning: failed to add cookies: {exc}")
+                _log.warning("Failed to add cookies: %s", exc)
 
-        await apply_stealth_to_context(ctx, self._stealth_bundle, self._fingerprint_seed)
-        return ctx
+        await apply_stealth_to_context(self._context, self._stealth_bundle, self._fingerprint_seed)
+        return self._context
 
     async def save_storage_state(self, path: str | Path | None = None) -> None:
         """Persist cookies/localStorage snapshot (Playwright storage state)."""

@@ -2,7 +2,7 @@
 """
 Autonomous Facebook agent driven by the JSON decision brain (Ollama llama3.1:8b).
 
-Each step: observe page state → brain outputs JSON action → Playwright executes it.
+Each step: observe page state, brain outputs JSON action, Playwright executes it.
 
 Requires Ollama running and ``OLLAMA_MODEL`` in ``.env`` (default ``llama3.1:8b``).
 
@@ -23,6 +23,13 @@ import signal
 import sys
 from pathlib import Path
 from typing import Any
+
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
 
 from dotenv import load_dotenv
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -52,11 +59,12 @@ from playwright_automation.agent_executor import (  # noqa: E402
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-22-friend-send-one-parity-v32"
+_AGENT_BUILD = "2026-06-06-browser-unlock-v34"
 _DAILY_SHARE_STATE = "daily_share_quota.json"
 _DAILY_FRIEND_STATE = "daily_friend_quota.json"
 _DAILY_POST_STATE = "daily_post_quota.json"
 from playwright_automation.bot_core import BaseBot  # noqa: E402
+from playwright_automation.browser_profile import browser_user_data_dir  # noqa: E402
 from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E402
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
 from playwright_automation.user_agent_rotation import UserAgentRotator  # noqa: E402
@@ -66,8 +74,8 @@ from playwright_automation.account_session import (  # noqa: E402
     DEFAULT_COOKIES_PATH,
     DEFAULT_PASSWORD,
     DESKTOP_USER_AGENTS,
-    FEED_URL,
     MOBILE_USER_AGENTS,
+    feed_url_for_mobile,
     looks_logged_in,
     parse_account_block_from_cookies,
     wait_for_login_or_stop,
@@ -425,7 +433,7 @@ async def _agent_loop(
 async def _run(args: argparse.Namespace) -> None:
     cookies_path = Path(args.cookies_file).expanduser().resolve()
     target_id = args.account_id
-    password = args.password or _DEFAULT_PASSWORD
+    password = args.password or DEFAULT_PASSWORD
     parsed = parse_account_block_from_cookies(cookies_path, target_id)
     cookies: list[dict[str, Any]] = []
     if parsed:
@@ -436,6 +444,7 @@ async def _run(args: argparse.Namespace) -> None:
     profile_dir = (_ROOT / "profiles" / target_id).resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
     storage_state = profile_dir / "storage_state.json"
+    browser_dir = browser_user_data_dir(profile_dir)
 
     if args.mobile:
         ua_pool, ua_platform = MOBILE_USER_AGENTS, "Linux armv8l"
@@ -445,7 +454,7 @@ async def _run(args: argparse.Namespace) -> None:
         viewport = {"width": args.width, "height": args.height}
 
     bot = BaseBot(
-        profile_dir,
+        browser_dir,
         headless=args.headless,
         timezone_id=args.timezone,
         storage_state_path=storage_state,
@@ -462,13 +471,16 @@ async def _run(args: argparse.Namespace) -> None:
         await bot.start()
     except PlaywrightError as exc:
         log.error(
-            "Browser could not start (profile may be in use by another bot window).\n"
-            "  1. Close any Chromium window opened by run_agent_brain.\n"
-            "  2. Stop other bot scripts in other terminals (Ctrl+C).\n"
-            "  3. Run again: python scripts/run_agent_brain.py\n"
-            "Profile: %s\n"
+            "Browser could not start.\n"
+            "  1. Close any Chromium window from a previous run.\n"
+            "  2. Stop other bot scripts (Ctrl+C in other terminals).\n"
+            "  3. Unlock profile: python scripts/unlock_browser_profile.py\n"
+            "  4. Run again: python scripts/run_agent_brain.py\n"
+            "Account data: %s\n"
+            "Browser profile: %s\n"
             "Detail: %s",
             profile_dir,
+            browser_dir,
             exc,
         )
         raise SystemExit(1) from exc
@@ -487,12 +499,13 @@ async def _run(args: argparse.Namespace) -> None:
 
     loop_failed = False
     try:
-        await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=60_000)
+        await page.goto(feed_url_for_mobile(args.mobile), wait_until="domcontentloaded", timeout=60_000)
         await asyncio.sleep(random.uniform(1.5, 3.0))
+        home = feed_url_for_mobile(args.mobile)
         if await looks_like_checkpoint(page):
             await wait_for_login_or_stop(page, stop, label="checkpoint")
         elif not await looks_logged_in(page):
-            await stealthy_facebook_login(page, email=target_id, password=password, home_url=FEED_URL)
+            await stealthy_facebook_login(page, email=target_id, password=password, home_url=home)
             if not await looks_logged_in(page):
                 await wait_for_login_or_stop(page, stop, label="login")
 
@@ -592,7 +605,25 @@ async def _run(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def _ensure_dependencies() -> None:
+    missing: list[str] = []
+    for mod, pip_name in (
+        ("dotenv", "python-dotenv"),
+        ("playwright", "playwright"),
+        ("httpx", "httpx"),
+    ):
+        try:
+            __import__(mod)
+        except ImportError:
+            missing.append(pip_name)
+    if missing:
+        print("Missing packages:", ", ".join(missing))
+        print("Run: pip install -r requirements.txt && python -m playwright install chromium")
+        raise SystemExit(1)
+
+
 def main() -> None:
+    _ensure_dependencies()
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
     p.add_argument("--password", default="")
@@ -625,7 +656,7 @@ def main() -> None:
         "--daily-friend-min",
         type=int,
         default=3,
-        help="Min friend requests to send per calendar day (only if audience ≥ MIN_AUDIENCE_FRIEND_REQUEST)",
+        help="Min friend requests to send per calendar day (only if audience >= MIN_AUDIENCE_FRIEND_REQUEST)",
     )
     p.add_argument(
         "--daily-friend-max",
@@ -649,7 +680,7 @@ def main() -> None:
         "--max-friend-send",
         type=int,
         default=1,
-        help="Max friend requests per brain/structured cycle (daily cap 3–4; audience ≥ 2k)",
+        help="Max friend requests per brain/structured cycle (daily cap 3-4; audience >= 2k)",
     )
     p.add_argument(
         "--friend-scroll-rounds",
@@ -681,7 +712,7 @@ def main() -> None:
         "--profile-stalk-min-appeal",
         type=float,
         default=42.0,
-        help="Minimum appeal score 0–100 to engage on a profile post",
+        help="Minimum appeal score 0-100 to engage on a profile post",
     )
     p.add_argument(
         "--no-profile-ollama-pick",

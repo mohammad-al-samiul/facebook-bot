@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check whether Ollama is already running (you usually do NOT need ``ollama serve``)."""
+"""Check whether Ollama is running and the configured model is installed."""
 
 from __future__ import annotations
 
@@ -12,18 +12,28 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 from dotenv import load_dotenv
 
 load_dotenv(_ROOT / ".env", override=False)
 
-from playwright_automation.brain import _default_model, _ollama_base_url
+from playwright_automation.brain import (  # noqa: E402
+    _configured_ollama_base_url,
+    _default_model,
+    _ollama_candidate_urls,
+    resolve_ollama_base_url,
+)
 
-DEFAULT_URL = _ollama_base_url()
 DEFAULT_MODEL = _default_model()
 
 
 def _model_is_available(requested: str, installed: list[str]) -> tuple[bool, list[str]]:
-    """Return whether ``requested`` is installed (exact or same base name)."""
     req = requested.strip()
     if not req:
         return False, []
@@ -35,20 +45,26 @@ def _model_is_available(requested: str, installed: list[str]) -> tuple[bool, lis
 
 
 def main() -> int:
-    url = f"{DEFAULT_URL}/api/tags"
+    base_url = resolve_ollama_base_url()
+    if not base_url:
+        tried = ", ".join(_ollama_candidate_urls())
+        print("Ollama is NOT reachable. Tried:", tried)
+        print("Configured:", _configured_ollama_base_url())
+        print()
+        print("Start the Ollama desktop app (Windows tray), then run this script again.")
+        print("Or set OLLAMA_HOST=127.0.0.1:11434 in .env")
+        return 1
+
+    url = f"{base_url}/api/tags"
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:
             data = json.loads(resp.read().decode())
     except urllib.error.URLError as exc:
-        print("Ollama is NOT reachable at", DEFAULT_URL)
-        print("  ", exc)
-        print()
-        print("Start the Ollama desktop app (Windows tray), then run this script again.")
-        print(f"Use the same host as ollama serve, e.g. export OLLAMA_HOST=127.0.0.1:18000")
+        print("Ollama responded at", base_url, "but /api/tags failed:", exc)
         return 1
 
     names = [m.get("name", "?") for m in data.get("models", [])]
-    print("Ollama is already running at", DEFAULT_URL)
+    print("Ollama is running at", base_url)
     print("Installed models:", ", ".join(names) if names else "(none)")
     ok, matches = _model_is_available(DEFAULT_MODEL, names)
     if ok:
@@ -57,16 +73,14 @@ def main() -> int:
         else:
             print(
                 f"Configured model '{DEFAULT_MODEL}' is available "
-                f"(installed: {', '.join(matches)}).",
+                f"(installed: {', '.join(matches)})."
             )
     else:
         print(f"Warning: OLLAMA_MODEL={DEFAULT_MODEL!r} not in list. Run: ollama pull {DEFAULT_MODEL}")
     print()
-    print("You do NOT need: ollama serve")
-    print(f"Bot .env should set OLLAMA_HOST / OLLAMA_BASE_URL to {DEFAULT_URL}")
+    print(f"Set OLLAMA_HOST / OLLAMA_BASE_URL to {base_url} in .env")
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

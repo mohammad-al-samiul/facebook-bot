@@ -2693,7 +2693,7 @@ async def create_feed_post(page: Page, text: str) -> bool:
 
     for attempt in range(1, 4):
         await _prepare_own_post_composer(page)
-        use_composer_url = attempt >= 2
+        use_composer_url = attempt >= 1
         if not await _open_status_composer(page, prefer_url=use_composer_url):
             _STATUS_LOG.warning("Status composer open failed (attempt %d/3)", attempt)
             await random_delay(1.0, 2.0)

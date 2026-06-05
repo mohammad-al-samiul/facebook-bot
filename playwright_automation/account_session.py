@@ -16,6 +16,11 @@ DEFAULT_COOKIES_PATH = _ROOT / "cookies.txt"
 DEFAULT_ACCOUNT_ID = "100001514018857"
 DEFAULT_PASSWORD = "123456"
 FEED_URL = "https://www.facebook.com/"
+MOBILE_FEED_URL = "https://m.facebook.com/"
+
+
+def feed_url_for_mobile(mobile: bool) -> str:
+    return MOBILE_FEED_URL if mobile else FEED_URL
 
 MOBILE_USER_AGENTS: tuple[str, ...] = (
     "Mozilla/5.0 (Linux; Android 14; SM-A546B) AppleWebKit/537.36 "

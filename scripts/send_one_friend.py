@@ -20,6 +20,13 @@ import sys
 from datetime import date
 from pathlib import Path
 
+if sys.platform == "win32":
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 from dotenv import load_dotenv
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -34,6 +41,7 @@ from playwright_automation.agent_executor import (  # noqa: E402
     run_daily_friend_send_phase,
 )
 from playwright_automation.bot_core import BaseBot  # noqa: E402
+from playwright_automation.browser_profile import browser_user_data_dir  # noqa: E402
 from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E402
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
 from playwright_automation.user_agent_rotation import UserAgentRotator  # noqa: E402
@@ -42,6 +50,7 @@ from playwright_automation.account_session import (  # noqa: E402
     DEFAULT_ACCOUNT_ID,
     DEFAULT_PASSWORD,
     MOBILE_USER_AGENTS,
+    feed_url_for_mobile,
     looks_logged_in,
     parse_account_block_from_cookies,
 )
@@ -103,7 +112,7 @@ def _apply_quota(session: AgentSession, quota: dict) -> None:
 
 
 async def main() -> None:
-    p = argparse.ArgumentParser(description="Send friend requests from suggestions (≥2k audience).")
+    p = argparse.ArgumentParser(description="Send friend requests from suggestions (>=2k audience).")
     p.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
     p.add_argument("--password", default=None)
     p.add_argument("--mobile", action="store_true", default=True)
@@ -145,6 +154,7 @@ async def main() -> None:
 
     profile_dir = (_ROOT / "profiles" / args.account_id).resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
+    browser_dir = browser_user_data_dir(profile_dir)
     quota = _load_quota(profile_dir)
     session = AgentSession()
     _apply_quota(session, quota)
@@ -172,7 +182,7 @@ async def main() -> None:
     )
 
     bot = BaseBot(
-        profile_dir,
+        browser_dir,
         headless=args.headless,
         storage_state_path=profile_dir / "storage_state.json",
         cookies=cookies or None,
@@ -186,11 +196,11 @@ async def main() -> None:
     await bot.start()
     page = await bot.context.new_page()
     try:
-        await page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=60_000)
+        await page.goto(feed_url_for_mobile(True), wait_until="domcontentloaded", timeout=60_000)
         await asyncio.sleep(2.0)
         if not await looks_logged_in(page):
             await stealthy_facebook_login(
-                page, email=args.account_id, password=password, home_url="https://www.facebook.com/"
+                page, email=args.account_id, password=password, home_url=feed_url_for_mobile(True)
             )
         if await looks_like_checkpoint(page):
             log.error("Account checkpoint — log in manually, then re-run.")
