@@ -1,0 +1,8 @@
+# Ensure Markdown and text files stay UTF-8 on Windows (GitHub renders UTF-8 only).
+*.md text eol=lf encoding=utf-8
+*.py text eol=lf encoding=utf-8
+*.txt text eol=lf encoding=utf-8
+*.json text eol=lf encoding=utf-8
+*.yml text eol=lf encoding=utf-8
+*.yaml text eol=lf encoding=utf-8
+*.bat text eol=crlf encoding=utf-8
