@@ -1,13 +1,12 @@
 [project]
-name = "playwright-automation"
-version = "0.1.0"
-description = "Modular Playwright automation with stealth, UA rotation, and persistent sessions"
+name = "facebook-agent"
+version = "0.2.0"
+description = "Autonomous Facebook browser agent with Ollama brain and human-like Playwright automation"
 requires-python = ">=3.10"
 dependencies = [
   "playwright>=1.49.0",
   "playwright-stealth>=2.0.0",
   "httpx>=0.27.0",
-  "motor>=3.6.0",
   "tzdata>=2024.1",
   "python-dotenv>=1.0.0",
 ]

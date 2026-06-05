@@ -1,5 +1,13 @@
-"""Modular Playwright automation: stealth defaults, UA rotation, and BaseBot."""
+"""Modular Playwright automation: stealth, UA rotation, Ollama brain, and BaseBot."""
 
+from playwright_automation.account_session import (
+    DEFAULT_ACCOUNT_ID,
+    DEFAULT_COOKIES_PATH,
+    DEFAULT_PASSWORD,
+    FEED_URL,
+    looks_logged_in,
+    parse_account_block_from_cookies,
+)
 from playwright_automation.agent_brain import AgentDecision, AgentState, decide_next_action
 from playwright_automation.agent_executor import AgentSession, agent_step, gather_agent_state
 from playwright_automation.brain import (
@@ -29,13 +37,6 @@ from playwright_automation.ai_comment import (
     get_ai_comment,
 )
 from playwright_automation.bot_core import BaseBot
-from playwright_automation.database import (
-    AsyncBotDatabase,
-    get_bot_config,
-    load_session,
-    log_action,
-    save_session,
-)
 from playwright_automation.facebook_graph import (
     DEFAULT_MIN_AUDIENCE,
     DEFAULT_MIN_FRIENDS,
@@ -62,11 +63,14 @@ __all__ = [
     "AgentDecision",
     "AgentSession",
     "AgentState",
-    "AsyncBotDatabase",
     "BaseBot",
     "BrainError",
+    "DEFAULT_ACCOUNT_ID",
+    "DEFAULT_COOKIES_PATH",
     "DEFAULT_MIN_AUDIENCE",
     "DEFAULT_MIN_FRIENDS",
+    "DEFAULT_PASSWORD",
+    "FEED_URL",
     "FollowStatus",
     "FriendRequestStatus",
     "GENERIC_COMMENTS",
@@ -90,19 +94,17 @@ __all__ = [
     "generate_comment_for_post",
     "generate_status_post",
     "get_ai_comment",
-    "get_bot_config",
     "handle_chat",
     "human_click",
     "human_like_scroll",
     "human_scroll",
+    "looks_logged_in",
+    "parse_account_block_from_cookies",
     "smooth_scroll",
     "human_type",
-    "load_session",
-    "log_action",
     "pick_reaction_probability_weights",
     "raise_if_account_restricted",
     "random_delay",
     "react_to_post",
-    "save_session",
     "share_post",
 ]

@@ -52,7 +52,7 @@ from playwright_automation.agent_executor import (  # noqa: E402
 )
 
 # Bump when changing engagement logic — printed at startup so you know the script restarted.
-_AGENT_BUILD = "2026-05-22-daily-trending-posts-v31"
+_AGENT_BUILD = "2026-05-22-friend-send-one-parity-v32"
 _DAILY_SHARE_STATE = "daily_share_quota.json"
 _DAILY_FRIEND_STATE = "daily_friend_quota.json"
 _DAILY_POST_STATE = "daily_post_quota.json"
@@ -61,17 +61,16 @@ from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
 from playwright_automation.user_agent_rotation import UserAgentRotator  # noqa: E402
 
-# Reuse cookie helpers from single-account runner
-from scripts.run_single_account import (  # noqa: E402
-    _DEFAULT_ACCOUNT_ID,
-    _DEFAULT_COOKIES,
-    _DEFAULT_PASSWORD,
-    _DESKTOP_USER_AGENTS,
-    _FEED_URL,
-    _MOBILE_USER_AGENTS,
-    _looks_logged_in,
-    _parse_account_block_from_cookies,
-    _wait_for_login_or_stop,
+from playwright_automation.account_session import (  # noqa: E402
+    DEFAULT_ACCOUNT_ID,
+    DEFAULT_COOKIES_PATH,
+    DEFAULT_PASSWORD,
+    DESKTOP_USER_AGENTS,
+    FEED_URL,
+    MOBILE_USER_AGENTS,
+    looks_logged_in,
+    parse_account_block_from_cookies,
+    wait_for_login_or_stop,
 )
 
 log = logging.getLogger("agent_brain_runner")
@@ -251,7 +250,8 @@ def _apply_daily_friend_state(session, profile_dir: Path) -> None:
     if day == today:
         session.friends_sent_today = sent
         if target > 0:
-            session.daily_friend_target = target
+            cap = max(session.daily_friend_min, session.daily_friend_max)
+            session.daily_friend_target = min(target, cap)
         log.info(
             "Loaded daily friends: %d/%d sent today (target %d, audience ≥%d)",
             session.friends_sent_today,
@@ -426,7 +426,7 @@ async def _run(args: argparse.Namespace) -> None:
     cookies_path = Path(args.cookies_file).expanduser().resolve()
     target_id = args.account_id
     password = args.password or _DEFAULT_PASSWORD
-    parsed = _parse_account_block_from_cookies(cookies_path, target_id)
+    parsed = parse_account_block_from_cookies(cookies_path, target_id)
     cookies: list[dict[str, Any]] = []
     if parsed:
         file_pwd, cookies = parsed
@@ -438,10 +438,10 @@ async def _run(args: argparse.Namespace) -> None:
     storage_state = profile_dir / "storage_state.json"
 
     if args.mobile:
-        ua_pool, ua_platform = _MOBILE_USER_AGENTS, "Linux armv8l"
+        ua_pool, ua_platform = MOBILE_USER_AGENTS, "Linux armv8l"
         viewport = {"width": 360, "height": 800}
     else:
-        ua_pool, ua_platform = _DESKTOP_USER_AGENTS, "Win32"
+        ua_pool, ua_platform = DESKTOP_USER_AGENTS, "Win32"
         viewport = {"width": args.width, "height": args.height}
 
     bot = BaseBot(
@@ -463,7 +463,7 @@ async def _run(args: argparse.Namespace) -> None:
     except PlaywrightError as exc:
         log.error(
             "Browser could not start (profile may be in use by another bot window).\n"
-            "  1. Close any Chromium window opened by run_single_account / run_agent_brain.\n"
+            "  1. Close any Chromium window opened by run_agent_brain.\n"
             "  2. Stop other bot scripts in other terminals (Ctrl+C).\n"
             "  3. Run again: python scripts/run_agent_brain.py\n"
             "Profile: %s\n"
@@ -487,14 +487,14 @@ async def _run(args: argparse.Namespace) -> None:
 
     loop_failed = False
     try:
-        await page.goto(_FEED_URL, wait_until="domcontentloaded", timeout=60_000)
+        await page.goto(FEED_URL, wait_until="domcontentloaded", timeout=60_000)
         await asyncio.sleep(random.uniform(1.5, 3.0))
         if await looks_like_checkpoint(page):
-            await _wait_for_login_or_stop(page, stop, label="checkpoint")
-        elif not await _looks_logged_in(page):
-            await stealthy_facebook_login(page, email=target_id, password=password, home_url=_FEED_URL)
-            if not await _looks_logged_in(page):
-                await _wait_for_login_or_stop(page, stop, label="login")
+            await wait_for_login_or_stop(page, stop, label="checkpoint")
+        elif not await looks_logged_in(page):
+            await stealthy_facebook_login(page, email=target_id, password=password, home_url=FEED_URL)
+            if not await looks_logged_in(page):
+                await wait_for_login_or_stop(page, stop, label="login")
 
         await click_feed_tab(page, log=log)
         await random_delay(1.5, 3.0)
@@ -594,9 +594,9 @@ async def _run(args: argparse.Namespace) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--account-id", default=_DEFAULT_ACCOUNT_ID)
+    p.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
     p.add_argument("--password", default="")
-    p.add_argument("--cookies-file", default=str(_DEFAULT_COOKIES))
+    p.add_argument("--cookies-file", default=str(DEFAULT_COOKIES_PATH))
     p.add_argument("--headless", action="store_true")
     p.add_argument("--timezone", default="Asia/Dhaka")
     p.add_argument("--width", type=int, default=1280)
@@ -624,13 +624,13 @@ def main() -> None:
     p.add_argument(
         "--daily-friend-min",
         type=int,
-        default=4,
+        default=3,
         help="Min friend requests to send per calendar day (only if audience ≥ MIN_AUDIENCE_FRIEND_REQUEST)",
     )
     p.add_argument(
         "--daily-friend-max",
         type=int,
-        default=5,
+        default=4,
         help="Max friend requests to send per calendar day (random target between min and max each day)",
     )
     p.add_argument(
@@ -648,28 +648,28 @@ def main() -> None:
     p.add_argument(
         "--max-friend-send",
         type=int,
-        default=5,
-        help="Max friend requests per cycle burst (capped by remaining daily quota; audience ≥ 2k)",
+        default=1,
+        help="Max friend requests per brain/structured cycle (daily cap 3–4; audience ≥ 2k)",
     )
     p.add_argument(
         "--friend-scroll-rounds",
         type=int,
-        default=6,
-        help="Light scroll passes on suggestions page (capped ~10; not 50×)",
+        default=5,
+        help="Light scroll passes on suggestions (same as send_one_friend.py)",
     )
-    p.add_argument("--friend-stalk-min", type=int, default=2, help="Min profiles to open and check per cycle")
-    p.add_argument("--friend-stalk-max", type=int, default=4, help="Max profiles to open and check per cycle")
+    p.add_argument("--friend-stalk-min", type=int, default=2, help="Legacy stalk cap (random row stalk is primary)")
+    p.add_argument("--friend-stalk-max", type=int, default=4, help="Legacy stalk cap (random row stalk is primary)")
     p.add_argument(
         "--profile-stalk-min-sec",
         type=float,
-        default=55.0,
-        help="Seconds to browse each stalked profile (min; friend phase ~1–2 min)",
+        default=12.0,
+        help="Seconds on each stalked profile (min; send_one_friend style)",
     )
     p.add_argument(
         "--profile-stalk-max-sec",
         type=float,
-        default=125.0,
-        help="Seconds to browse each stalked profile (max)",
+        default=28.0,
+        help="Seconds on each stalked profile (max)",
     )
     p.add_argument(
         "--profile-stalk-engage",

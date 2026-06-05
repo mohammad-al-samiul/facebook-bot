@@ -143,9 +143,9 @@ class AgentSession:
     feed_memory_snippets: list[str] = field(default_factory=list)
     friends_sent_today: int = 0
     friend_quota_day: str = ""
-    daily_friend_target: int = 5
-    daily_friend_min: int = 4
-    daily_friend_max: int = 5
+    daily_friend_target: int = 4
+    daily_friend_min: int = 3
+    daily_friend_max: int = 4
     posts_today: int = 0
     post_quota_day: str = ""
     daily_post_target: int = 4
@@ -157,8 +157,16 @@ def _today_key() -> str:
     return date.today().isoformat()
 
 
+# Same knobs as scripts/send_one_friend.py (random row stalk + short profile browse).
+FRIEND_SUGGEST_SCROLL_ROUNDS = 5
+FRIEND_PROFILE_STALK_MIN_SEC = 12.0
+FRIEND_PROFILE_STALK_MAX_SEC = 28.0
+FRIEND_RANDOM_STALK_MIN = 15
+FRIEND_RANDOM_STALK_MAX = 25
+
+
 def refresh_friend_quota_day(session: AgentSession) -> None:
-    """Reset daily friend-send counter; pick a new 4–5 target when the day rolls over."""
+    """Reset daily friend-send counter; pick a new 3–4 target when the day rolls over."""
     key = _today_key()
     if session.friend_quota_day != key:
         session.friend_quota_day = key
@@ -286,21 +294,25 @@ async def run_daily_friend_send_phase(
     session: AgentSession,
     *,
     min_audience: int = DEFAULT_MIN_AUDIENCE,
-    max_send_per_burst: int = 5,
-    friend_scroll_rounds: int = 6,
+    max_send_per_burst: int = 1,
+    friend_scroll_rounds: int = FRIEND_SUGGEST_SCROLL_ROUNDS,
     friend_stalk_min: int = 2,
     friend_stalk_max: int = 4,
-    profile_stalk_min_sec: float = 55.0,
-    profile_stalk_max_sec: float = 125.0,
+    profile_stalk_min_sec: float = FRIEND_PROFILE_STALK_MIN_SEC,
+    profile_stalk_max_sec: float = FRIEND_PROFILE_STALK_MAX_SEC,
     profile_stalk_max_engagements: int = 0,
     profile_stalk_min_appeal: float = 42.0,
     profile_stalk_use_ollama: bool = True,
     return_to_feed_after: bool = True,
+    random_stalk_min: int = FRIEND_RANDOM_STALK_MIN,
+    random_stalk_max: int = FRIEND_RANDOM_STALK_MAX,
+    min_send_goal: int | None = None,
 ) -> int:
     """
-    Send friend requests until the **daily** target (default 4–5) is met.
+    Send friend requests until the **daily** target (default 3–4) is met.
 
-    Each opened profile must have friends **or** followers ≥ ``min_audience`` (default 2000).
+    Uses the same flow as ``scripts/send_one_friend.py``: light scroll on suggestions,
+    open 15–25 random rows, short profile stalk, Ollama/DOM audience ≥ ``min_audience``.
     """
     remaining = friends_remaining_today(session)
     if remaining <= 0:
@@ -313,35 +325,39 @@ async def run_daily_friend_send_phase(
         return 0
 
     burst = min(remaining, max(1, max_send_per_burst))
-    stalk_hi = max(friend_stalk_max, min(remaining + 2, 8))
+    stalk_hi = max(friend_stalk_max, burst, 6)
     stalk_lo = min(friend_stalk_min, stalk_hi)
+    if min_send_goal is None:
+        min_send_goal = burst if max_send_per_burst >= remaining else min(1, burst)
 
     _log.info(
-        "Friend phase: send up to %d now (%d/%d daily goal, ≥%d friends/followers)",
+        "Friend phase: send up to %d now (%d/%d daily goal, ≥%d friends/followers, "
+        "random stalk %d–%d)",
         burst,
         session.friends_sent_today,
         session.daily_friend_target,
         min_audience,
+        random_stalk_min,
+        random_stalk_max,
     )
 
     try:
-        min_goal = 1 if remaining > 0 else 0
         sent = await bot.send_friend_requests_from_suggestions(
             page=page,
             min_audience=min_audience,
             max_send=burst,
             scroll_rounds=friend_scroll_rounds,
             stalk_min=stalk_lo,
-            stalk_max=max(stalk_hi, 6 if min_goal else stalk_hi),
+            stalk_max=stalk_hi,
             profile_stalk_min_sec=profile_stalk_min_sec,
             profile_stalk_max_sec=profile_stalk_max_sec,
             profile_stalk_max_engagements=profile_stalk_max_engagements,
             profile_stalk_min_appeal=profile_stalk_min_appeal,
             profile_stalk_use_ollama=profile_stalk_use_ollama,
             return_to_feed_after=return_to_feed_after,
-            min_send_goal=min_goal,
-            random_stalk_min=15,
-            random_stalk_max=20,
+            min_send_goal=min_send_goal,
+            random_stalk_min=random_stalk_min,
+            random_stalk_max=random_stalk_max,
         )
     except Exception as exc:
         _log.warning("Daily friend send phase failed: %s", exc)
@@ -1028,15 +1044,15 @@ async def run_structured_cycle(
     session: AgentSession,
     *,
     skip_friends: bool = True,
-    max_friend_send: int = 4,
+    max_friend_send: int = 1,
     max_friend_accept: int = 2,
     feed_rounds: int = 2,
     feed_warmup_segments: int = 12,
-    friend_scroll_rounds: int = 6,
+    friend_scroll_rounds: int = FRIEND_SUGGEST_SCROLL_ROUNDS,
     friend_stalk_min: int = 2,
     friend_stalk_max: int = 4,
-    profile_stalk_min_sec: float = 28.0,
-    profile_stalk_max_sec: float = 45.0,
+    profile_stalk_min_sec: float = FRIEND_PROFILE_STALK_MIN_SEC,
+    profile_stalk_max_sec: float = FRIEND_PROFILE_STALK_MAX_SEC,
     profile_stalk_max_engagements: int = 2,
     profile_stalk_min_appeal: float = 42.0,
     profile_stalk_use_ollama: bool = True,

@@ -3654,10 +3654,27 @@ async def _locate_share_caption_input(page: Page) -> Locator | None:
 
 
 async def _type_share_caption(page: Page, box: Locator | None, body: str) -> bool:
-    """Focus the caption field and type ``body`` character by character."""
+    """Type share caption like a human: char-by-char, typos, backspace, short pauses."""
     text = (body or "").strip()[:300]
     if not text:
         return False
+
+    rng = random.Random()
+
+    async def _human_type_focused() -> None:
+        try:
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Delete")
+            await random_delay(0.1, 0.28)
+        except Exception:
+            pass
+        await human_type_natural(
+            page,
+            text,
+            rng=rng,
+            char_min_ms=55,
+            char_max_ms=220,
+        )
 
     if box is not None:
         try:
@@ -3672,7 +3689,26 @@ async def _type_share_caption(page: Page, box: Locator | None, body: str) -> boo
                     await box.click(timeout=3_500, force=(attempt >= 2))
                 except Exception:
                     pass
-            await random_delay(0.12, 0.38)
+            await random_delay(0.15, 0.45)
+
+            try:
+                await box.focus(timeout=3_500)
+            except Exception:
+                pass
+
+            try:
+                await _human_type_focused()
+                await human_review_pause(rng=rng, min_sec=0.7, max_sec=2.2)
+                if await _share_caption_appears_typed(page):
+                    _share_log.info(
+                        "Typed share caption (human natural, %d chars): %r",
+                        len(text),
+                        text[:70],
+                    )
+                    await random_delay(0.35, 0.8)
+                    return True
+            except Exception as exc:
+                _share_log.debug("Share caption human typing failed (try %d): %s", attempt, exc)
 
             tag = ""
             try:
@@ -3680,69 +3716,25 @@ async def _type_share_caption(page: Page, box: Locator | None, body: str) -> boo
             except Exception:
                 tag = ""
 
-            if tag in ("textarea", "input"):
-                try:
-                    await box.fill("")
-                    await random_delay(0.06, 0.16)
-                    await box.fill(text)
-                    await human_review_pause(min_sec=0.45, max_sec=1.3)
-                    if await _share_caption_appears_typed(page):
-                        _share_log.info("Typed share caption via fill (%d chars): %r", len(text), text[:70])
-                        await random_delay(0.35, 0.75)
-                        return True
-                except Exception as exc:
-                    _share_log.debug("Share caption fill failed (try %d): %s", attempt, exc)
-
+            if tag in ("textarea", "input") and attempt >= 2:
                 try:
                     await box.focus(timeout=3_500)
-                    try:
-                        await page.keyboard.press("Control+A")
-                        await page.keyboard.press("Delete")
-                    except Exception:
-                        pass
-                    await random_delay(0.08, 0.22)
-                    await box.press_sequentially(
-                        text, delay=int(random.randint(12, 38)),
-                    )
-                    await human_review_pause(min_sec=0.45, max_sec=1.3)
+                    await box.press_sequentially(text, delay=int(random.randint(18, 42)))
+                    await human_review_pause(rng=rng, min_sec=0.4, max_sec=1.0)
                     if await _share_caption_appears_typed(page):
                         _share_log.info(
-                            "Typed share caption via press_sequentially (%d chars): %r",
+                            "Typed share caption via press_sequentially fallback (%d chars)",
                             len(text),
-                            text[:70],
                         )
-                        await random_delay(0.35, 0.75)
                         return True
                 except Exception as exc:
-                    _share_log.debug("Share caption press_sequentially failed (try %d): %s", attempt, exc)
+                    _share_log.debug("Share caption press_sequentially fallback: %s", exc)
 
-            try:
-                await box.focus(timeout=3_000)
-                try:
-                    await page.keyboard.press("Control+A")
-                    await page.keyboard.press("Delete")
-                    await random_delay(0.1, 0.25)
-                except Exception:
-                    pass
-                await human_type_into_focused(page, text, rng=random.Random())
-                await human_review_pause(min_sec=0.55, max_sec=2.0)
-                if await _share_caption_appears_typed(page):
-                    _share_log.info("Typed share caption via keyboard (%d chars): %r", len(text), text[:70])
-                    await random_delay(0.35, 0.75)
-                    return True
-            except Exception as exc:
-                _share_log.debug("Share caption keyboard typing failed (try %d): %s", attempt, exc)
             await random_delay(0.25, 0.55)
 
-    # No locator or everything failed above — last resort typing to focused surface.
     try:
-        try:
-            await page.keyboard.press("Control+A")
-            await page.keyboard.press("Delete")
-        except Exception:
-            pass
-        await human_type_into_focused(page, text, rng=random.Random())
-        await human_review_pause(min_sec=0.55, max_sec=2.0)
+        await _human_type_focused()
+        await human_review_pause(rng=rng, min_sec=0.55, max_sec=2.0)
     except Exception:
         pass
 
@@ -3750,25 +3742,23 @@ async def _type_share_caption(page: Page, box: Locator | None, body: str) -> boo
         _share_log.warning("Share caption not visible in composer after typing")
         return False
 
-    _share_log.info("Typed share caption (%d chars, fallback-focus): %r", len(text), text[:70])
+    _share_log.info("Typed share caption (human, focused surface, %d chars): %r", len(text), text[:70])
     await random_delay(0.4, 0.9)
     return True
 
 
 async def _fill_share_caption(page: Page, caption: str) -> bool:
-    """Type the share caption into the repost composer after Share to Facebook."""
+    """Type the share caption into the repost composer (human typing first; JS inject last)."""
     body = (caption or "").strip()
     if not body:
         return False
 
     await _open_share_caption_composer(page)
+    await random_delay(0.25, 0.55)
 
     for attempt in range(1, 10):
         if attempt > 1:
             await random_delay(0.45, 0.95)
-
-        if await _js_set_share_caption(page, body):
-            return True
 
         box = await _locate_share_caption_input(page)
         if box is not None and await _type_share_caption(page, box, body):
@@ -3785,6 +3775,7 @@ async def _fill_share_caption(page: Page, caption: str) -> bool:
             await _open_share_caption_composer(page)
 
     if await _js_set_share_caption(page, body):
+        _share_log.info("Share caption set via JS inject (last resort, %d chars)", len(body))
         return True
 
     _share_log.warning(

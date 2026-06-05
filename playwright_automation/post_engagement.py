@@ -14,7 +14,7 @@ This module contains the high-level "process the next post" logic that:
 - Returns a structured summary of what happened so callers can implement
   cooldowns / metrics on top.
 
-Designed for the single-account use case (``scripts/run_ai_bot.py``).
+Designed for feed engagement inside ``run_agent_brain.py``.
 """
 
 from __future__ import annotations
