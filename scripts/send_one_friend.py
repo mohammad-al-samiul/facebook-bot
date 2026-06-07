@@ -46,13 +46,11 @@ from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
 from playwright_automation.user_agent_rotation import UserAgentRotator  # noqa: E402
 
+from playwright_automation.account_registry import load_account, resolve_proxy  # noqa: E402
 from playwright_automation.account_session import (  # noqa: E402
-    DEFAULT_ACCOUNT_ID,
-    DEFAULT_PASSWORD,
     MOBILE_USER_AGENTS,
     feed_url_for_mobile,
     looks_logged_in,
-    parse_account_block_from_cookies,
 )
 
 log = logging.getLogger("send_one_friend")
@@ -113,8 +111,9 @@ def _apply_quota(session: AgentSession, quota: dict) -> None:
 
 async def main() -> None:
     p = argparse.ArgumentParser(description="Send friend requests from suggestions (>=2k audience).")
-    p.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
-    p.add_argument("--password", default=None)
+    p.add_argument("--account-id", default="", required=False)
+    p.add_argument("--password", default="")
+    p.add_argument("--proxy", default="")
     p.add_argument("--mobile", action="store_true", default=True)
     p.add_argument("--headless", action="store_true")
     p.add_argument("--min-audience", type=int, default=DEFAULT_MIN_AUDIENCE)
@@ -145,14 +144,24 @@ async def main() -> None:
         raise SystemExit(1)
     log.info("Ollama OK at %s", ollama_url)
 
-    cookies_path = _ROOT / "cookies.txt"
-    password = args.password or DEFAULT_PASSWORD
-    parsed = parse_account_block_from_cookies(cookies_path, args.account_id)
-    cookies = []
-    if parsed:
-        password, cookies = parsed
+    account_id = (args.account_id or "").strip()
+    if not account_id:
+        raise SystemExit("Pass --account-id")
 
-    profile_dir = (_ROOT / "profiles" / args.account_id).resolve()
+    account = load_account(
+        account_id,
+        cookies_path=_ROOT / "cookies.txt",
+        password_override=args.password,
+        proxy_override=args.proxy,
+    )
+    if not account or not account.password:
+        raise SystemExit(f"No password for account {account_id}")
+
+    password = account.password
+    cookies = account.cookies
+    proxy = resolve_proxy(args.proxy, account_proxy=account.proxy_url)
+
+    profile_dir = (_ROOT / "profiles" / account_id).resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
     browser_dir = browser_user_data_dir(profile_dir)
     quota = _load_quota(profile_dir)
@@ -184,6 +193,7 @@ async def main() -> None:
     bot = BaseBot(
         browser_dir,
         headless=args.headless,
+        proxy=proxy,
         storage_state_path=profile_dir / "storage_state.json",
         cookies=cookies or None,
         viewport={"width": 360, "height": 800},
@@ -200,7 +210,7 @@ async def main() -> None:
         await asyncio.sleep(2.0)
         if not await looks_logged_in(page):
             await stealthy_facebook_login(
-                page, email=args.account_id, password=password, home_url=feed_url_for_mobile(True)
+                page, email=account_id, password=password, home_url=feed_url_for_mobile(True)
             )
         if await looks_like_checkpoint(page):
             log.error("Account checkpoint — log in manually, then re-run.")

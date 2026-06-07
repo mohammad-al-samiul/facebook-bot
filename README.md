@@ -32,7 +32,12 @@ python scripts/unlock_browser_profile.py --kill-chrome
 python scripts/run_agent_brain.py
 ```
 
-Add accounts in `cookies.txt` (three lines per account: id, password, cookie string).
+Add accounts in `accounts/accounts.json` (recommended) or legacy `cookies.txt` (three lines per account: id, password, cookie string).
+
+```bash
+cp accounts/accounts.json.example accounts/accounts.json
+# Or migrate: python scripts/migrate_cookies_to_registry.py
+```
 
 ## Daily behaviour
 
@@ -59,18 +64,47 @@ bot-agent/
   cookies.txt
 ```
 
+## Fleet (multiple bots)
+
+```bash
+python scripts/migrate_cookies_to_registry.py   # optional: cookies.txt → accounts.json
+python scripts/fleet_launcher.py --max-bots 10 --phase 1
+python scripts/fleet_launcher.py --status
+```
+
+See [docs/FLEET_SCALING.md](docs/FLEET_SCALING.md) for phase-wise scaling (5 → 50 → 500+ bots).
+
+Docker fleet (one container per account, one-click start):
+
+**Windows:** double-click `scripts/start_fleet_docker.bat`
+
+```bat
+scripts\start_fleet_docker.bat    REM start all bots
+scripts\stop_fleet_docker.bat     REM stop all bots
+```
+
+Linux:
+
+```bash
+bash scripts/start_fleet_docker.sh
+```
+
+Sessions persist in `profiles/<account_id>/` — first run logs in, later runs reuse the saved session.
+
 ## Commands
 
 ```bash
-python scripts/run_agent_brain.py
-python scripts/run_agent_brain.py --mode structured
+python scripts/run_agent_brain.py --account-id YOUR_ID
+python scripts/run_agent_brain.py --mode structured --headless --proxy http://user:pass@host:port
 python scripts/run_agent_brain.py --skip-friends
-python scripts/send_one_friend.py
+python scripts/send_one_friend.py --account-id YOUR_ID
 ```
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--mode` | brain | Ollama decides vs fixed structured cycle |
+| `--mode` | brain | Ollama decides vs fixed structured cycle (fleet default: structured) |
+| `--proxy` | — | Per-bot proxy URL (`PROXY_URL` env also supported) |
+| `--fleet-mode` | off | Worker mode: headless, no manual checkpoint wait |
 | `--daily-friend-min/max` | 3 / 4 | Daily friend request range |
 | `--daily-post-min/max` | 3 / 5 | Daily status post range |
 | `--max-friend-send` | 1 | Friend requests per cycle |

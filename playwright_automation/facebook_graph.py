@@ -567,6 +567,19 @@ async def _navigate_friend_suggestions(page: Page, *, navigation_timeout: float)
     return _FRIEND_SUGGESTIONS_URLS[0]
 
 
+async def _ensure_friend_suggestions(page: Page, *, navigation_timeout: float) -> str:
+    """Reuse the open suggestions page — avoid reloading the same URL every visit."""
+    try:
+        if await _add_friend_button(page).count() > 0:
+            url = page.url or _FRIEND_SUGGESTIONS_URLS[0]
+            if "friend" in url.lower():
+                _log.debug("Friend suggestions still open (%d rows)", await _add_friend_button(page).count())
+                return url
+    except Exception:
+        pass
+    return await _navigate_friend_suggestions(page, navigation_timeout=navigation_timeout)
+
+
 async def _collect_visible_suggestion_profiles(
     page: Page,
 ) -> list[tuple[str, int | None]]:
@@ -1096,6 +1109,25 @@ async def _stalk_profile_then_maybe_send(
             source,
             profile_url,
         )
+        dwell_min = float(os.environ.get("FRIEND_SENT_VIEW_MIN_SEC", "5"))
+        dwell_max = max(dwell_min, float(os.environ.get("FRIEND_SENT_VIEW_MAX_SEC", "11")))
+        _log.info(
+            "Pausing on profile %.1f–%.1fs to see friend request sent",
+            dwell_min,
+            dwell_max,
+        )
+        await random_delay(dwell_min, dwell_max)
+        try:
+            from playwright_automation.actions import smooth_scroll
+
+            await smooth_scroll(
+                page,
+                total_pixels=rng.randint(100, 260),
+                duration_sec=rng.uniform(1.0, 2.2),
+            )
+            await random_delay(1.2, 2.8)
+        except Exception as exc:
+            _log.debug("Post-send profile scroll: %s", exc)
     else:
         _log.info("Visit %d — Add friend %s on %s", visit_index, status, profile_url)
     return status
@@ -1215,20 +1247,24 @@ async def send_friend_requests_from_suggestions(
             visited_profiles: set[str] = set()
             visited_rows: set[int] = set()
             visit_serial = 0
-            max_visit_attempts = max(max_send * 15, r_hi * 2, 45)
+            consecutive_open_fails = 0
+            max_consecutive_fails = max(1, int(os.environ.get("FRIEND_OPEN_FAIL_MAX", "2")))
+            max_visit_attempts = min(max(max_send * 5, r_hi + 2), 15)
             visits_planned = min(max_visit_attempts, len(row_indices) * 2)
             _log.info(
-                "Phase 2: stalk until %d send(s) (up to %d visits, %d visible rows)",
+                "Phase 2: stalk until %d send(s) (up to %d visits, %d visible rows, "
+                "leave after %d open failures)",
                 max_send,
                 max_visit_attempts,
                 len(row_indices),
+                max_consecutive_fails,
             )
 
             while sent < max_send and visit_serial < max_visit_attempts:
                 if min_send_goal > 0 and sent >= min_send_goal:
                     break
 
-                await _navigate_friend_suggestions(p, navigation_timeout=navigation_timeout)
+                await _ensure_friend_suggestions(p, navigation_timeout=navigation_timeout)
                 fresh_rows = await _visible_add_friend_row_indices(p)
                 available = [i for i in fresh_rows if i not in visited_rows]
                 if len(available) < 3:
@@ -1254,12 +1290,45 @@ async def send_friend_requests_from_suggestions(
                     navigation_timeout=navigation_timeout,
                 )
                 if not profile_url:
+                    buttons = _add_friend_button(p)
+                    try:
+                        btn_count = await buttons.count()
+                    except Exception:
+                        btn_count = 0
+                    if row_idx < btn_count:
+                        fallback = await _profile_url_near_button(p, buttons.nth(row_idx))
+                        if fallback:
+                            try:
+                                await p.goto(
+                                    fallback,
+                                    wait_until="domcontentloaded",
+                                    timeout=int(navigation_timeout),
+                                )
+                                await asyncio.sleep(rng.uniform(1.2, 2.0))
+                                profile_url = _normalize_profile_url(p.url or "") or fallback
+                            except Exception:
+                                profile_url = None
+                if not profile_url:
+                    consecutive_open_fails += 1
                     _log.warning(
-                        "Visit %d: row %d — could not open profile",
+                        "Visit %d: row %d — could not open profile (%d/%d fails)",
                         visit_serial,
                         row_idx,
+                        consecutive_open_fails,
+                        max_consecutive_fails,
                     )
+                    await random_delay(1.5, 3.0)
+                    if consecutive_open_fails >= max_consecutive_fails:
+                        _log.info(
+                            "Leaving friend suggestions — %d profile open failures in a row "
+                            "(sent %d/%d)",
+                            consecutive_open_fails,
+                            sent,
+                            max_send,
+                        )
+                        break
                     continue
+                consecutive_open_fails = 0
                 if profile_url in visited_profiles:
                     _log.debug("Skip duplicate profile %s", profile_url)
                     continue

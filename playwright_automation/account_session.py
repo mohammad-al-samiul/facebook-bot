@@ -13,8 +13,7 @@ from playwright.async_api import Page
 _ROOT = Path(__file__).resolve().parent.parent
 
 DEFAULT_COOKIES_PATH = _ROOT / "cookies.txt"
-DEFAULT_ACCOUNT_ID = "100001514018857"
-DEFAULT_PASSWORD = "123456"
+DEFAULT_ACCOUNT_ID = ""
 FEED_URL = "https://www.facebook.com/"
 MOBILE_FEED_URL = "https://m.facebook.com/"
 

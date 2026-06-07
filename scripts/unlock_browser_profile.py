@@ -18,7 +18,7 @@ if sys.platform == "win32":
         except Exception:
             pass
 
-from playwright_automation.account_session import DEFAULT_ACCOUNT_ID  # noqa: E402
+from playwright_automation.account_registry import list_account_ids  # noqa: E402
 from playwright_automation.browser_profile import (  # noqa: E402
     browser_user_data_dir,
     kill_chrome_using_profile,
@@ -51,14 +51,22 @@ async def _main(account_id: str, *, kill: bool) -> int:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Unlock Chromium profile for run_agent_brain.")
-    p.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
+    p.add_argument("--account-id", default="", help="Profile account id (required if multiple profiles)")
     p.add_argument(
         "--kill-chrome",
         action="store_true",
         help="Stop chrome.exe processes bound to this profile (recommended)",
     )
     args = p.parse_args()
-    raise SystemExit(asyncio.run(_main(args.account_id, kill=args.kill_chrome)))
+    account_id = (args.account_id or "").strip()
+    if not account_id:
+        ids = list_account_ids()
+        if len(ids) == 1:
+            account_id = ids[0]
+        else:
+            print("Pass --account-id (or keep exactly one account in registry/cookies.txt)")
+            raise SystemExit(1)
+    raise SystemExit(asyncio.run(_main(account_id, kill=args.kill_chrome)))
 
 
 if __name__ == "__main__":

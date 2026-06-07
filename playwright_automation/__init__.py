@@ -1,13 +1,20 @@
 """Modular Playwright automation: stealth, UA rotation, Ollama brain, and BaseBot."""
 
+from playwright_automation.account_registry import (
+    AccountRecord,
+    load_account,
+    load_registry,
+    parse_proxy_url,
+    resolve_proxy,
+)
 from playwright_automation.account_session import (
     DEFAULT_ACCOUNT_ID,
     DEFAULT_COOKIES_PATH,
-    DEFAULT_PASSWORD,
     FEED_URL,
     looks_logged_in,
     parse_account_block_from_cookies,
 )
+from playwright_automation.fleet_status import FleetBotStatus, read_status, write_status
 from playwright_automation.agent_brain import AgentDecision, AgentState, decide_next_action
 from playwright_automation.agent_executor import AgentSession, agent_step, gather_agent_state
 from playwright_automation.brain import (
@@ -65,12 +72,19 @@ __all__ = [
     "AgentState",
     "BaseBot",
     "BrainError",
+    "AccountRecord",
     "DEFAULT_ACCOUNT_ID",
     "DEFAULT_COOKIES_PATH",
     "DEFAULT_MIN_AUDIENCE",
     "DEFAULT_MIN_FRIENDS",
-    "DEFAULT_PASSWORD",
     "FEED_URL",
+    "FleetBotStatus",
+    "load_account",
+    "load_registry",
+    "parse_proxy_url",
+    "read_status",
+    "resolve_proxy",
+    "write_status",
     "FollowStatus",
     "FriendRequestStatus",
     "GENERIC_COMMENTS",

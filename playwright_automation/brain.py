@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -122,6 +123,26 @@ def ollama_is_available(*, base_url: str | None = None, timeout: float = 4.0) ->
         return False
 
 
+_ollama_last_call: float = 0.0
+
+
+def _fleet_ollama_throttle() -> None:
+    """Optional min gap between Ollama calls when many fleet workers share one server."""
+    global _ollama_last_call
+    raw = (os.environ.get("FLEET_OLLAMA_MIN_INTERVAL_SEC") or "0").strip()
+    try:
+        interval = float(raw)
+    except ValueError:
+        return
+    if interval <= 0:
+        return
+    now = time.monotonic()
+    wait = interval - (now - _ollama_last_call)
+    if wait > 0:
+        time.sleep(wait)
+    _ollama_last_call = time.monotonic()
+
+
 def _chat(
     messages: list[dict[str, str]],
     *,
@@ -130,6 +151,7 @@ def _chat(
     timeout: float = 120.0,
     format_json: bool = False,
 ) -> str:
+    _fleet_ollama_throttle()
     url = f"{(base_url or _ollama_base_url()).rstrip('/')}/api/chat"
     body: dict[str, Any] = {
         "model": model or _default_model(),

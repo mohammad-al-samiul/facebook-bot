@@ -1,5 +1,9 @@
 .env
 cookies.txt
+accounts/accounts.json
+accounts/*.env
+docker-compose.override.yml
+docker-compose.fleet.yml
 __pycache__/
 *.py[cod]
 .venv/

@@ -1,0 +1,69 @@
+# One bot container per account. Scale with fleet_launcher on the host or duplicate services.
+#
+# Setup:
+#   cp accounts/accounts.json.example accounts/accounts.json
+#   # Fill id, password, cookies, proxy per account
+#
+# Run example (3 bots):
+#   docker compose up --build bot1 bot2 bot3
+#
+# Or generate many services:
+#   python scripts/generate_compose_services.py --count 10
+
+services:
+  bot1:
+    build: .
+    image: bot-agent:latest
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: "0.5"
+    environment:
+      ACCOUNT_ID: "${BOT1_ACCOUNT_ID:-}"
+      PASSWORD: "${BOT1_PASSWORD:-}"
+      PROXY_URL: "${BOT1_PROXY_URL:-}"
+      FLEET_MODE: "1"
+      FLEET_OLLAMA_MIN_INTERVAL_SEC: "8.0"
+      OLLAMA_HOST: "${OLLAMA_HOST:-host.docker.internal:11434}"
+    volumes:
+      - ./profiles/bot1:/app/profiles/${BOT1_ACCOUNT_ID:-bot1}
+      - ./accounts/accounts.json:/app/accounts/accounts.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  bot2:
+    build: .
+    image: bot-agent:latest
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: "0.5"
+    environment:
+      ACCOUNT_ID: "${BOT2_ACCOUNT_ID:-}"
+      PASSWORD: "${BOT2_PASSWORD:-}"
+      PROXY_URL: "${BOT2_PROXY_URL:-}"
+      FLEET_MODE: "1"
+      FLEET_OLLAMA_MIN_INTERVAL_SEC: "8.0"
+      OLLAMA_HOST: "${OLLAMA_HOST:-host.docker.internal:11434}"
+    volumes:
+      - ./profiles/bot2:/app/profiles/${BOT2_ACCOUNT_ID:-bot2}
+      - ./accounts/accounts.json:/app/accounts/accounts.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  bot3:
+    build: .
+    image: bot-agent:latest
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: "0.5"
+    environment:
+      ACCOUNT_ID: "${BOT3_ACCOUNT_ID:-}"
+      PASSWORD: "${BOT3_PASSWORD:-}"
+      PROXY_URL: "${BOT3_PROXY_URL:-}"
+      FLEET_MODE: "1"
+      FLEET_OLLAMA_MIN_INTERVAL_SEC: "8.0"
+      OLLAMA_HOST: "${OLLAMA_HOST:-host.docker.internal:11434}"
+    volumes:
+      - ./profiles/bot3:/app/profiles/${BOT3_ACCOUNT_ID:-bot3}
+      - ./accounts/accounts.json:/app/accounts/accounts.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

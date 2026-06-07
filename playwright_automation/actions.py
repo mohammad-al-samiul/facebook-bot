@@ -2174,7 +2174,26 @@ async def resume_feed_after_share(
 
 
 async def _return_after_successful_comment_submit(page: Page) -> bool:
-    """Leave the comment layer right after submit; feed scroll runs in ``finally``."""
+    """Pause to read the comment on screen, then leave the comment layer."""
+    view_min = float(os.environ.get("COMMENT_VIEW_MIN_SEC", "4"))
+    view_max = max(view_min, float(os.environ.get("COMMENT_VIEW_MAX_SEC", "8")))
+    _comment_log.info(
+        "Comment posted — reading it on screen %.1f–%.1fs before closing",
+        view_min,
+        view_max,
+    )
+    await random_delay(view_min, view_max)
+    if await _comment_surface_is_open(page):
+        try:
+            await smooth_scroll(
+                page,
+                total_pixels=random.randint(90, 220),
+                duration_sec=random.uniform(0.9, 1.8),
+            )
+            await random_delay(1.0, 2.5)
+        except Exception as exc:
+            _comment_log.debug("Comment thread scroll: %s", exc)
+
     await random_delay(0.45, 0.95)
     closed = await dismiss_mobile_comment_surface_after_post(page, log=_comment_log)
     if not closed and await _comment_surface_is_open(page):
@@ -2184,10 +2203,10 @@ async def _return_after_successful_comment_submit(page: Page) -> bool:
         await random_delay(0.35, 0.75)
     if await _comment_surface_is_open(page):
         await force_exit_comment_composer(page, log=_comment_log, max_rounds=3)
-    settle = min(_COMMENT_SETTLE_MIN_SEC, 2.5)
-    settle_max = min(_COMMENT_SETTLE_MAX_SEC, 3.5)
+    settle = _COMMENT_SETTLE_MIN_SEC
+    settle_max = _COMMENT_SETTLE_MAX_SEC
     _comment_log.info(
-        "Comment submitted — brief pause %.1f–%.1fs on feed",
+        "Comment done — brief pause %.1f–%.1fs on feed",
         settle,
         settle_max,
     )

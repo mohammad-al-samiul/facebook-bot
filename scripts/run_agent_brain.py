@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import random
 import signal
 import sys
@@ -69,19 +70,64 @@ from playwright_automation.facebook_graph import DEFAULT_MIN_AUDIENCE  # noqa: E
 from playwright_automation.facebook_login import looks_like_checkpoint, stealthy_facebook_login  # noqa: E402
 from playwright_automation.user_agent_rotation import UserAgentRotator  # noqa: E402
 
+from playwright_automation.account_registry import (  # noqa: E402
+    DEFAULT_REGISTRY_PATH,
+    load_account,
+    list_account_ids,
+    resolve_proxy,
+)
 from playwright_automation.account_session import (  # noqa: E402
-    DEFAULT_ACCOUNT_ID,
     DEFAULT_COOKIES_PATH,
-    DEFAULT_PASSWORD,
     DESKTOP_USER_AGENTS,
     MOBILE_USER_AGENTS,
     feed_url_for_mobile,
     looks_logged_in,
-    parse_account_block_from_cookies,
     wait_for_login_or_stop,
+)
+from playwright_automation.fleet_status import (  # noqa: E402
+    FleetBotStatus,
+    STATUS_CHECKPOINT,
+    STATUS_ERROR,
+    STATUS_RUNNING,
+    STATUS_STARTING,
+    STATUS_STOPPED,
+    load_quotas_from_profile,
+    send_alert,
+    write_status,
 )
 
 log = logging.getLogger("agent_brain_runner")
+
+
+def _resolve_target_account_id(args: argparse.Namespace) -> str:
+    target = (args.account_id or os.environ.get("ACCOUNT_ID") or "").strip()
+    if target:
+        return target
+    registry_path = Path(args.registry_file).expanduser().resolve()
+    ids = list_account_ids(registry_path=registry_path, cookies_path=Path(args.cookies_file))
+    if len(ids) == 1:
+        return ids[0]
+    raise SystemExit(
+        "No --account-id. Set ACCOUNT_ID env, pass --account-id, or keep exactly one account in registry."
+    )
+
+
+def _persist_fleet_status(
+    profile_dir: Path,
+    status: FleetBotStatus,
+    *,
+    state: str | None = None,
+    error: str = "",
+    checkpoint: bool = False,
+) -> None:
+    if state:
+        status.state = state
+    if error:
+        status.last_error = error[:500]
+    status.checkpoint = checkpoint
+    status.quotas = load_quotas_from_profile(profile_dir)
+    status.touch(state=state, error=error)
+    write_status(profile_dir, status)
 
 
 def _load_daily_share_state(profile_dir: Path) -> tuple[str, int, list[str]]:
@@ -432,19 +478,41 @@ async def _agent_loop(
 
 async def _run(args: argparse.Namespace) -> None:
     cookies_path = Path(args.cookies_file).expanduser().resolve()
-    target_id = args.account_id
-    password = args.password or DEFAULT_PASSWORD
-    parsed = parse_account_block_from_cookies(cookies_path, target_id)
-    cookies: list[dict[str, Any]] = []
-    if parsed:
-        file_pwd, cookies = parsed
-        if not args.password:
-            password = file_pwd
+    registry_path = Path(args.registry_file).expanduser().resolve()
+    target_id = _resolve_target_account_id(args)
+    password_override = (args.password or os.environ.get("PASSWORD") or "").strip()
+    proxy_override = (args.proxy or os.environ.get("PROXY_URL") or "").strip()
+
+    account = load_account(
+        target_id,
+        registry_path=registry_path,
+        cookies_path=cookies_path,
+        password_override=password_override,
+        proxy_override=proxy_override,
+    )
+    if not account or not account.password:
+        raise SystemExit(
+            f"No password for account {target_id}. "
+            "Add to accounts/accounts.json, cookies.txt, or PASSWORD env."
+        )
+
+    password = account.password
+    cookies = account.cookies
+    proxy = resolve_proxy(args.proxy, account_proxy=account.proxy_url)
 
     profile_dir = (_ROOT / "profiles" / target_id).resolve()
     profile_dir.mkdir(parents=True, exist_ok=True)
     storage_state = profile_dir / "storage_state.json"
     browser_dir = browser_user_data_dir(profile_dir)
+
+    fleet_status = FleetBotStatus(
+        account_id=target_id,
+        pid=os.getpid(),
+        mode=args.mode,
+        proxy_configured=proxy is not None,
+        state=STATUS_STARTING,
+    )
+    _persist_fleet_status(profile_dir, fleet_status, state=STATUS_STARTING)
 
     if args.mobile:
         ua_pool, ua_platform = MOBILE_USER_AGENTS, "Linux armv8l"
@@ -456,6 +524,7 @@ async def _run(args: argparse.Namespace) -> None:
     bot = BaseBot(
         browser_dir,
         headless=args.headless,
+        proxy=proxy,
         timezone_id=args.timezone,
         storage_state_path=storage_state,
         cookies=cookies or None,
@@ -502,13 +571,47 @@ async def _run(args: argparse.Namespace) -> None:
         await page.goto(feed_url_for_mobile(args.mobile), wait_until="domcontentloaded", timeout=60_000)
         await asyncio.sleep(random.uniform(1.5, 3.0))
         home = feed_url_for_mobile(args.mobile)
+        if storage_state.is_file() and browser_dir.is_dir():
+            log.info(
+                "Account %s: reusing persisted browser session (%s)",
+                target_id,
+                storage_state.name,
+            )
+        elif cookies:
+            log.info("Account %s: seeding cookies from registry (first run)", target_id)
         if await looks_like_checkpoint(page):
-            await wait_for_login_or_stop(page, stop, label="checkpoint")
+            _persist_fleet_status(
+                profile_dir,
+                fleet_status,
+                state=STATUS_CHECKPOINT,
+                checkpoint=True,
+            )
+            send_alert(
+                f"Account {target_id} hit Facebook checkpoint",
+                account_id=target_id,
+                state=STATUS_CHECKPOINT,
+            )
+            if args.fleet_mode:
+                log.warning("Fleet mode: stopping bot at checkpoint (no manual wait)")
+                stop.set()
+            else:
+                await wait_for_login_or_stop(page, stop, label="checkpoint")
         elif not await looks_logged_in(page):
+            log.info("Account %s: not logged in — starting login", target_id)
             await stealthy_facebook_login(page, email=target_id, password=password, home_url=home)
             if not await looks_logged_in(page):
-                await wait_for_login_or_stop(page, stop, label="login")
+                if args.fleet_mode:
+                    _persist_fleet_status(
+                        profile_dir,
+                        fleet_status,
+                        state=STATUS_ERROR,
+                        error="login failed",
+                    )
+                    stop.set()
+                else:
+                    await wait_for_login_or_stop(page, stop, label="login")
 
+        _persist_fleet_status(profile_dir, fleet_status, state=STATUS_RUNNING)
         await click_feed_tab(page, log=log)
         await random_delay(1.5, 3.0)
 
@@ -557,44 +660,70 @@ async def _run(args: argparse.Namespace) -> None:
                     args.daily_post_max,
                     args.steps_per_burst,
                 )
-        await _agent_loop(
-            bot,
-            page,
-            stop,
-            mode=args.mode,
-            steps_per_burst=args.steps_per_burst,
-            min_pause=args.min_pause,
-            max_pause=args.max_pause,
-            skip_friends=args.skip_friends,
-            max_friend_send=args.max_friend_send,
-            max_friend_accept=args.max_friend_accept,
-            feed_rounds=args.feed_rounds,
-            friend_scroll_rounds=args.friend_scroll_rounds,
-            friend_stalk_min=args.friend_stalk_min,
-            friend_stalk_max=args.friend_stalk_max,
-            profile_stalk_min_sec=args.profile_stalk_min_sec,
-            profile_stalk_max_sec=args.profile_stalk_max_sec,
-            profile_stalk_max_engagements=args.profile_stalk_max_engagements,
-            profile_stalk_min_appeal=args.profile_stalk_min_appeal,
-            profile_stalk_use_ollama=args.profile_stalk_use_ollama,
-            min_daily_shares=args.min_daily_shares,
-            feed_warmup_segments=args.feed_warmup_segments,
-            profile_dir=profile_dir,
-            daily_friend_min=args.daily_friend_min,
-            daily_friend_max=args.daily_friend_max,
-            daily_post_min=args.daily_post_min,
-            daily_post_max=args.daily_post_max,
-        )
+        if not stop.is_set():
+            async def _status_heartbeat() -> None:
+                while not stop.is_set():
+                    _persist_fleet_status(profile_dir, fleet_status, state=STATUS_RUNNING)
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        continue
+
+            heartbeat_task = asyncio.create_task(_status_heartbeat())
+            try:
+                await _agent_loop(
+                    bot,
+                    page,
+                    stop,
+                    mode=args.mode,
+                    steps_per_burst=args.steps_per_burst,
+                    min_pause=args.min_pause,
+                    max_pause=args.max_pause,
+                    skip_friends=args.skip_friends,
+                    max_friend_send=args.max_friend_send,
+                    max_friend_accept=args.max_friend_accept,
+                    feed_rounds=args.feed_rounds,
+                    friend_scroll_rounds=args.friend_scroll_rounds,
+                    friend_stalk_min=args.friend_stalk_min,
+                    friend_stalk_max=args.friend_stalk_max,
+                    profile_stalk_min_sec=args.profile_stalk_min_sec,
+                    profile_stalk_max_sec=args.profile_stalk_max_sec,
+                    profile_stalk_max_engagements=args.profile_stalk_max_engagements,
+                    profile_stalk_min_appeal=args.profile_stalk_min_appeal,
+                    profile_stalk_use_ollama=args.profile_stalk_use_ollama,
+                    min_daily_shares=args.min_daily_shares,
+                    feed_warmup_segments=args.feed_warmup_segments,
+                    profile_dir=profile_dir,
+                    daily_friend_min=args.daily_friend_min,
+                    daily_friend_max=args.daily_friend_max,
+                    daily_post_min=args.daily_post_min,
+                    daily_post_max=args.daily_post_max,
+                )
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
     except asyncio.CancelledError:
         log.info("Agent interrupted — browser stays open until you close the tab.")
         raise
     except Exception as exc:
         loop_failed = True
+        _persist_fleet_status(
+            profile_dir,
+            fleet_status,
+            state=STATUS_ERROR,
+            error=str(exc),
+        )
+        send_alert(f"Bot {target_id} error: {exc}", account_id=target_id, state=STATUS_ERROR)
         log.exception(
             "Agent error (browser will stay open until you close the tab): %s",
             exc,
         )
-    if args.keep_browser_open:
+    else:
+        _persist_fleet_status(profile_dir, fleet_status, state=STATUS_STOPPED)
+    if args.keep_browser_open and not args.fleet_mode:
         await _wait_until_browser_closed(bot, page, log)
     try:
         if bot.context is not None:
@@ -625,10 +754,17 @@ def _ensure_dependencies() -> None:
 def main() -> None:
     _ensure_dependencies()
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--account-id", default=DEFAULT_ACCOUNT_ID)
-    p.add_argument("--password", default="")
+    p.add_argument("--account-id", default="", help="Facebook account id (or ACCOUNT_ID env)")
+    p.add_argument("--password", default="", help="Override password (or PASSWORD env)")
     p.add_argument("--cookies-file", default=str(DEFAULT_COOKIES_PATH))
+    p.add_argument("--registry-file", default=str(DEFAULT_REGISTRY_PATH))
+    p.add_argument("--proxy", default="", help="Proxy URL http://user:pass@host:port (or PROXY_URL env)")
     p.add_argument("--headless", action="store_true")
+    p.add_argument(
+        "--fleet-mode",
+        action="store_true",
+        help="Fleet worker: no manual checkpoint wait, always close browser on exit",
+    )
     p.add_argument("--timezone", default="Asia/Dhaka")
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=800)
@@ -749,6 +885,10 @@ def main() -> None:
         help="Close browser automatically when the script ends",
     )
     args = p.parse_args()
+    if os.environ.get("FLEET_MODE") == "1":
+        args.fleet_mode = True
+        args.headless = True
+        args.keep_browser_open = False
     args.profile_stalk_max_engagements = args.profile_stalk_engage
     args.profile_stalk_use_ollama = not args.no_profile_ollama_pick
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

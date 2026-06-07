@@ -1037,7 +1037,8 @@ async def generate_status_post(
     season_extra = _season_sensitive_avoid_styles(feed_blob)
     merged_avoid = list(dict.fromkeys([*(avoid_styles or []), *season_extra]))
 
-    use_bn = prefer_bn if prefer_bn is not None else random.random() < 0.55
+    bn_ratio = float(os.environ.get("STATUS_BN_RATIO", "0.65"))
+    use_bn = prefer_bn if prefer_bn is not None else random.random() < bn_ratio
     lang = "bn" if use_bn else "en"
     dhaka = _dhaka_now_line()
 
@@ -1154,6 +1155,20 @@ async def generate_status_post(
         if fed_off:
             logger.info("Trending offline status (relaxed, %s): %r", lang, fed_off[:80])
             return fed_off[:120], style
+        if use_bn:
+            fed_en = _offline_trending_status(topics, lang="en")
+            if fed_en and _accept_status_post(
+                fed_en, topics=topics, lang="en", feed_blob=feed_blob
+            ):
+                logger.info("Trending offline status (en fallback): %r", fed_en[:80])
+                return fed_en[:120], style
+        elif lang == "en":
+            fed_bn = _offline_trending_status(topics, lang="bn")
+            if fed_bn and _accept_status_post(
+                fed_bn, topics=topics, lang="bn", feed_blob=feed_blob
+            ):
+                logger.info("Trending offline status (bn fallback): %r", fed_bn[:80])
+                return fed_bn[:120], style
         return "", "skip"
 
     style = pick_status_post_style(avoid=merged_avoid)
@@ -1214,6 +1229,15 @@ async def generate_status_post(
             return text[:120], style
     except Exception as exc:
         logger.debug("Ollama status failed: %s", exc)
+
+    if use_bn and not comment_matches_post_language(fallback, "আ"):
+        bn_pool = _STATUS_STYLES[style].get("bn") or []
+        if bn_pool:
+            fallback = random.choice(bn_pool)
+    elif not use_bn and not comment_matches_post_language(fallback, "Hello"):
+        en_pool = _STATUS_STYLES[style].get("en") or []
+        if en_pool:
+            fallback = random.choice(en_pool)
 
     logger.info("Using offline %s status (no feed memory, style=%s)", lang, style)
     return fallback, style
