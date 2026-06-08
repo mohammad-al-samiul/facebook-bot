@@ -1,56 +1,56 @@
 # Facebook Agent — পুরো প্রজেক্ট সিস্টেম ডিজাইন (বাংলা)
 
-এই ডকুমেন্টে `facebook-agent` প্রজেক্টের **সম্পূর্ণ সিস্টেম ডিজাইন** বর্ণনা করা হয়েছে: উদ্দেশ্য, আর্কিটেকচার, কম্পোনেন্ট, ডেটা ফ্লো, persistence, AI ইনtegration, fleet scaling, এবং অপারেশন।
+এই ফাইলে `facebook-agent` প্রজেক্টটা ভেতর থেকে কীভাবে চলে — সেটা খুলে বলা আছে। আর্কিটেকচার, ফাইল স্ট্রাকচার, daily quota, AI, fleet — সব এক জায়গায়।
 
 ---
 
 ## সূচিপত্র
 
-1. [সিস্টেম ওভারভিউ](#১-সিস্টেম-ওভারভিউ)
-2. [সিস্টেম কনটেক্সট](#২-সিস্টেম-কনটেক্সট)
+1. [প্রজেক্টটা আসলে কী?](#১-প্রজেক্টটা-আসলে-কী)
+2. [বাইরের দুনিয়ার সাথে কীভাবে জড়িত](#২-বাইরের-দুনিয়ার-সাথে-কীভাবে-জড়িত)
 3. [আর্কিটেকচার](#৩-আর্কিটেকচার)
-4. [টেকনোলজি স্ট্যাক — কেন ও কী কাজে](#৪-টেকনোলজি-স্ট্যাক--কেন-ও-কী-কাজে)
-5. [প্রজেক্ট স্ট্রাকচার](#৫-প্রজেক্ট-স্ট্রাকচার)
-6. [মূল কম্পোনেন্ট](#৬-মূল-কম্পোনেন্ট)
-7. [রান মোড ও কন্ট্রোল ফ্লো](#৭-রান-মোড-ও-কন্ট্রোল-ফ্লো)
-8. [ডেটা ফ্লো ডায়াগ্রাম](#৮-ডেটা-ফ্লো-ডায়াগ্রাম)
-9. [অ্যাকাউন্ট ও সেশন ম্যানেজমেন্ট](#৯-অ্যাকাউন্ট-ও-সেশন-ম্যানেজমেন্ট)
-10. [স্টেট persistence ও দৈনিক কোটা](#১০-স্টেট-persistence-ও-দৈনিক-কোটা)
-11. [AI ও LLM ইনtegration](#১১-ai-ও-llm-ইনtegration)
-12. [ব্রাউজার অটোমেশন ও স্টেলথ](#১২-ব্রাউজার-অটোমেশন-ও-স্টেলথ)
-13. [Facebook কার্যকলাপ ফ্লো](#১৩-facebook-কার্যকলাপ-ফ্লো)
-14. [Fleet ও Docker ডিপ্লয়মেন্ট](#১৪-fleet-ও-docker-ডিপ্লয়মেন্ট)
-15. [বাহ্যিক ইনtegration](#১৫-বাহ্যিক-ইনtegration)
-16. [কনফিগারেশন রেফারেন্স](#১৬-কনফিগারেশন-রেফারেন্স)
-17. [CLI এন্ট্রি পয়েন্ট](#১৭-cli-এন্ট্রি-পয়েন্ট)
-18. [নিরাপত্তা ও অপারেশনাল নোট](#১৮-নিরাপত্তা-ও-অপারেশনাল-নোট)
-19. [সমস্যা সমাধান](#১৯-সমস্যা-সমাধান)
+4. [কোন technology কেন নিয়েছি](#৪-কোন-technology-কেন-নিয়েছি)
+5. [ফোল্ডার ও ফাইল](#৫-ফোল্ডার-ও-ফাইল)
+6. [মূল মডিউলগুলো](#৬-মূল-মডিউলগুলো)
+7. [চালানোর দুটো মোড](#৭-চালানোর-দুটো-মোড)
+8. [ডেটা কীভাবে ঘুরে](#৮-ডেটা-কীভাবে-ঘুরে)
+9. [অ্যাকাউন্ট ও লগইন](#৯-অ্যাকাউন্ট-ও-লগইন)
+10. [কোথায় কী save হয় + daily limit](#১০-কোথায়-কী-save-হয়--daily-limit)
+11. [AI / LLM কীভাবে কাজে লাগে](#১১-ai--llm-কীভাবে-কাজে-লাগে)
+12. [ব্রাউজার automation ও bot ধরা পড়া এড়ানো](#১২-ব্রাউজার-automation-ও-bot-ধরা-পড়া-এড়ানো)
+13. [Facebook-এ কী কী করে](#১৩-facebook-এ-কী-কী-করে)
+14. [অনেক বট একসাথে (fleet + Docker)](#১৪-অনেক-বট-একসাথে-fleet--docker)
+15. [বাইরের service গুলো](#১৫-বাইরের-service-গুলো)
+16. [`.env` ও config](#১৬-env-ও-config)
+17. [কোন command কী করে](#১৭-কোন-command-কী-করে)
+18. [নিরাপত্তা — যা মাথায় রাখবেন](#১৮-নিরাপত্তা--যা-মাথায়-রাখবেন)
+19. [সমস্যা হলে কী করবেন](#১৯-সমস্যা-হলে-কী-করবেন)
 
 ---
 
-## ১. সিস্টেম ওভারভিউ
+## ১. প্রজেক্টটা আসলে কী?
 
-### ১.১ উদ্দেশ্য
+### ১.১ এক কথায়
 
-`facebook-agent` একটি **CLI-চালিত Python অটোমেশন সিস্টেম** যা Playwright দিয়ে Chromium নিয়ন্ত্রণ করে **মানুষের মতো Facebook কার্যকলাপ** করে — একবারে একটি অ্যাকাউন্ট (অথবা fleet মোডে অনেকগুলো)।
+`facebook-agent` হলো একটা **Python CLI tool**। Playwright দিয়ে Chromium ব্রাউজার চালায়, আর **local Ollama** (তোমার PC-তে চলা LLM) দিয়ে ঠিক করে নেয় পরের কাজ কী — লাইক নাকি কমেন্ট, স্ক্রল নাকি পোস্ট। একবারে একটা Facebook account; চাইলে fleet mode-এ অনেকগুলো একসাথে।
 
-**ক্ষমতাসমূহ:**
+### ১.২ কী কী করতে পারে
 
-| ক্ষমতা | বর্ণনা |
-|--------|--------|
-| ফিড এনgage | স্ক্রল, লাইক, রিঅ্যাক্ট, কমেন্ট, শেয়ার |
-| স্ট্যাটাস পোস্ট | ফিড মেমোরি থেকে ট্রেন্ডিং টপিক বুঝে মূল মতামত পোস্ট |
-| ফ্রেন্ড রিকোয়েস্ট | দিনে সীমিত সংখ্যক — শুধু ২০০০+ ফলোয়ার/ফ্রেন্ড আছে এমন প্রোফাইলে |
-| সেশন persistence | রিস্টার্টের পরেও কুকি ও দৈনিক কাউন্টার সংরক্ষিত |
-| Multi-account fleet | subprocess launcher বা Docker দিয়ে অনেক বট |
+| কাজ | সংক্ষেপে |
+|-----|---------|
+| ফিড | স্ক্রল, লাইক, কমেন্ট, শেয়ার |
+| স্ট্যাটাস পোস্ট | ফিডে যা দেখছে সেখান থেকে topic বের করে নিজের মতো পোস্ট |
+| ফ্রেন্ড রিকোয়েস্ট | দিনে ৩–৪টা; শুধু যাদের ২০০০+ ফ্রেন্ড/ফলোয়ার |
+| সেশন save | বন্ধ করে আবার চালালেও লগইন থাকে, daily count-ও থাকে |
+| fleet | এক PC বা server-এ অনেক account — subprocess বা Docker |
 
-### ১.২ এই সিস্টেম কী নয়
+### ১.৩ যেটা **না**
 
-- **ওয়েব সার্ভার নয়** — কোনো REST API, FastAPI, বা Flask backend নেই।
-- **ডাটাবেস-ভিত্তিক অ্যাপ নয়** — সব স্টেট `profiles/` ফোল্ডারে JSON ফাইলে।
-- **Facebook API ক্লায়েন্ট নয়** — সব কাজ ব্রাউজার UI দিয়ে, যেন একজন আসল ব্যবহারকারী।
+- **ওয়েব অ্যাপ না** — কোনো REST API server নেই।
+- **ডাটাবেস নেই** — সব `profiles/` ফোল্ডারে JSON ফাইল।
+- **Facebook Graph API ব্যবহার করে না** — যা করবে সব real browser দিয়ে, যেন তুমি নিজে বসে আছ।
 
-### ১.৩ মূল এন্ট্রি পয়েন্ট
+### ১.৪ শুরু করার command
 
 ```bash
 python scripts/run_agent_brain.py
@@ -58,282 +58,234 @@ python scripts/run_agent_brain.py
 
 ---
 
-## ২. সিস্টেম কনটেক্সট
+## ২. বাইরের দুনিয়ার সাথে কীভাবে জড়িত
 
 ```mermaid
 flowchart LR
     subgraph Operator
-        U[ব্যবহারকারী / DevOps]
+        U[তুমি / DevOps]
     end
 
-    subgraph facebook_agent["facebook-agent (এই প্রজেক্ট)"]
+    subgraph facebook_agent["facebook-agent"]
         CLI[CLI scripts]
         PA[playwright_automation]
         CLI --> PA
     end
 
     subgraph External
-        OLL[Ollama LLM]
+        OLL[local Ollama]
         GEM[Gemini API]
         FB[Facebook.com]
-        PX[HTTP Proxy]
-        WH[Alert Webhook]
+        PX[Proxy]
+        WH[Webhook]
     end
 
-    U -->|কমান্ড চালায়| CLI
-    PA -->|HTTP /api/chat| OLL
-    PA -->|HTTPS fallback| GEM
-    PA -->|Playwright browser| FB
-    PA -->|ঐচ্ছিক| PX
-    PA -->|ঐচ্ছিক alert| WH
+    U -->|command দাও| CLI
+    PA -->|HTTP| OLL
+    PA -->|backup| GEM
+    PA -->|browser| FB
+    PA -->|optional| PX
+    PA -->|alert| WH
 ```
 
 ---
 
 ## ৩. আর্কিটেকচার
 
-### ৩.১ স্তরভিত্তিক আর্কিটেকচার
+### ৩.১ স্তরগুলো (উপর থেকে নিচে)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  Presentation / Entry Layer                                 │
-│  scripts/run_agent_brain.py, fleet_launcher.py, docker_*    │
+│  Entry — তুমি command দাও                                  │
+│  run_agent_brain.py, fleet_launcher.py, docker_*           │
 └────────────────────────────┬────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────┐
-│  Orchestration Layer                                        │
-│  agent_executor.py — cycles, quotas, brain/structured modes │
+│  Orchestration — cycle, quota, brain/structured mode       │
+│  agent_executor.py                                          │
 └──────────────┬──────────────────────────┬───────────────────┘
                │                          │
 ┌──────────────▼──────────┐   ┌───────────▼───────────────────┐
-│  Decision / AI Layer    │   │  Browser Automation Layer     │
-│  agent_brain.py         │   │  actions.py, bot_core.py        │
-│  brain.py, ai_comment.py│   │  stealth_config, human_behavior │
+│  AI — সিদ্ধান্ত + text   │   │  Browser — click, type, scroll│
+│  agent_brain, ai_comment  │   │  actions, bot_core, stealth   │
 └──────────────┬──────────┘   └───────────┬───────────────────┘
                │                          │
 ┌──────────────▼──────────────────────────▼───────────────────┐
-│  Domain Layer (Facebook-specific)                             │
-│  facebook_graph, facebook_login, post_engagement,             │
-│  profile_engagement, account_session, account_registry        │
+│  Facebook logic — login, friend, feed, profile               │
 └────────────────────────────┬────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────┐
-│  Infrastructure Layer                                       │
-│  profiles/ JSON files, accounts/ credentials, .env config   │
+│  Storage — profiles/, accounts/, .env                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### ৩.২ কম্পোনেন্ট ইন্টারঅ্যাকশন (একটি বট)
+### ৩.২ একটা বট চললে কী কী মিলে কাজ করে
 
 ```
                     ┌─────────────────────────┐
-                    │  scripts/run_agent_brain │
-                    │  (CLI, লগইন, লুপ)       │
+                    │  run_agent_brain.py     │
+                    │  (লগইন + loop)          │
                     └────────────┬────────────┘
                                  │
          ┌───────────────────────┼───────────────────────┐
          ▼                       ▼                       ▼
   account_registry         agent_executor           BaseBot
-  account_session          (সাইকেল, কোটা)        (Playwright)
-  facebook_login                 │                       │
-         │           ┌──────────┴──────────┐            │
-         │           ▼                     ▼            │
-         │      agent_brain            actions ◄─────────┘
-         │      (JSON সিদ্ধান্ত)     (UI অটোমেশন)
+  (login, cookie)          (cycle, quota)          (Playwright)
+         │                       │                       │
+         │           ┌───────────┴───────────┐           │
+         │           ▼                       ▼           │
+         │      agent_brain              actions ◄─────────┘
+         │      (Ollama থেকে JSON)    (UI তে click/type)
          │           │
          │           ▼
-         │      brain.py ──HTTP──► Ollama (স্থানীয়)
+         │      brain.py ──────► local Ollama
          │           │
          │           ▼
-         └──────► ai_comment.py ──HTTP──► Gemini (ঐচ্ছিক)
+         └──────► ai_comment.py ──► Gemini (backup, optional)
                                    │
                                    ▼
-                            Facebook (ব্রাউজার)
+                            Facebook (browser)
 ```
 
-### ৩.৩ স্তর অনুযায়ী দায়িত্ব
+### ৩.৩ কোন ফাইল কী করে — দ্রুত তালিকা
 
-| স্তর | মডিউল | কাজ |
-|------|-------|-----|
-| এন্ট্রি | `run_agent_brain.py` | CLI args, ব্রাউজার চালু, অসীম লুপ |
-| এন্ট্রি | `fleet_launcher.py` | Nটি subprocess বট spawn, auto-restart |
-| এন্ট্রি | `docker_entrypoint.py` | কনটেইনার entry: stagger → agent চালু |
-| সেশন | `account_registry.py` | JSON, `.env`, `cookies.txt` থেকে credentials |
-| সেশন | `account_session.py` | কুকি পার্স, লগইন চেক, checkpoint wait |
-| সেশন | `facebook_login.py` | লগইন, checkpoint URL detect |
-| অর্কেস্ট্রেশন | `agent_executor.py` | দৈনিক কোটা, brain steps, structured cycles |
-| সিদ্ধান্ত | `agent_brain.py`, `brain.py` | Ollama-কে পরবর্তী JSON action |
-| কনটেন্ট | `ai_comment.py` | কমেন্ট, ক্যাপশন, স্ট্যাটাস |
-| ব্রাউজার | `actions.py`, `bot_core.py` | ক্লিক, স্ক্রল, টাইপ, রিঅ্যাক্ট |
-| সোশ্যাল গ্রাফ | `facebook_graph.py` | ফ্রেন্ড সাজেশন, অডিয়েন্স চেক |
-| ফিড | `post_engagement.py` | পোস্ট বাছাই, fingerprint dedup |
-| প্রোফাইল | `profile_engagement.py` | friend send-এর আগে profile stalk |
-| স্টেলথ | `stealth_config.py`, `human_behavior.py` | ফিঙ্গারপ্রিন্ট, প্রাকৃতিক টাইপিং |
-| Fleet ops | `fleet_status.py` | health JSON + webhook alerts |
-| Profile lock | `browser_profile.py` | Chromium lock ফাইল মুক্ত |
+| অংশ | ফাইল | কাজ |
+|-----|------|-----|
+| শুরু | `run_agent_brain.py` | argument নেয়, browser খোলে, loop চালায় |
+| fleet | `fleet_launcher.py` | account প্রতি একটা process, crash হলে restart |
+| Docker | `docker_entrypoint.py` | container-এ agent start |
+| account | `account_registry.py` | `accounts.json` / `.env` / `cookies.txt` পড়ে |
+| login | `account_session.py`, `facebook_login.py` | cookie, login check, checkpoint |
+| মাথা | `agent_executor.py` | daily quota, brain step, structured cycle |
+| AI | `agent_brain.py`, `brain.py` | local Ollama-কে জিজ্ঞেস — পরের action কী |
+| text | `ai_comment.py` | comment, caption, status post লেখে |
+| browser | `actions.py`, `bot_core.py` | click, scroll, type |
+| friend | `facebook_graph.py` | suggestion, follower count, add friend |
+| feed | `post_engagement.py` | কোন post-এ কাজ করবে |
+| profile | `profile_engagement.py` | friend পাঠানোর আগে profile ঘুরে দেখা |
+| stealth | `stealth_config.py`, `human_behavior.py` | bot detect এড়ানো, মানুষের মতো typing |
+| fleet status | `fleet_status.py` | health JSON + webhook alert |
+| lock fix | `browser_profile.py` | Chromium profile lock খুলে দেয় |
 
 ---
 
-## ৪. টেকনোলজি স্ট্যাক — কেন ও কী কাজে
+## ৪. কোন technology কেন নিয়েছি
 
-প্রতিটি **technology কেন নেওয়া হয়েছে** এবং **প্রজেক্টে ঠিক কী কাজ করে** — তা নিচে বর্ণনা করা হয়েছে।
+নিচে প্রতিটা tool **কী কাজে লাগে** আর **অন্য কিছু না নিয়ে এটা কেন** — সেটা বলা আছে।
 
-### ৪.১ সারসংক্ষেপ টেবিল
+### ৪.১ এক নজরে
 
-| Technology | প্রজেক্টে কী কাজ করে | কেন ব্যবহার |
-|------------|---------------------|------------|
-| **Python ≥ 3.10** | সব script ও `playwright_automation` লাইব্রেরি | async support, দ্রুত prototyping, automation ecosystem |
-| **Playwright (Chromium)** | বাস্তব ব্রাউজার চালায় — click, scroll, type, DOM, cookies | Facebook-এ feed/comment/share-এর public API নেই; UI দিয়ে real user-এর মতো |
-| **playwright-stealth** | automation fingerprint (`navigator.webdriver` ইত্যাদি) লুকায় | সাধারণ Playwright bot-detection signal কমায় |
-| **Custom stealth scripts** | canvas/WebGL/WebRTC noise ও init scripts | লাইব্রেরির বাইরে extra layer; mobile Facebook-এর জন্য |
-| **httpx** | Ollama, Gemini, fleet webhook-এ async HTTP | Playwright async loop-এ `requests`-এর চেয়ে সহজ |
-| **python-dotenv** | startup-এ `.env` থেকে env variable load | secret ও tuning source code-এ না রেখে এক ফাইলে |
-| **tzdata** | browser timezone (যেমন `Asia/Dhaka`) | Windows-এ zoneinfo incomplete হতে পারে |
-| **truststore + certifi** | Gemini HTTPS-এ TLS/SSL ঠিক রাখে | corporate proxy বা Windows-এ cert error এড়ায় |
-| **Ollama + llama3.1:8b** | local LLM — JSON action, comment, caption, status | offline, cloud cost নেই, desktop GPU/CPU-তে low latency |
-| **Google Gemini** | Ollama fail হলে text generation fallback | fleet-এ local GPU ছাড়াই comment/caption চালু রাখে |
-| **Docker + Compose** | bot প্রতি container, staggered startup | server-এ অনেক account scale; reproducible runtime |
-| **JSON (`profiles/`)** | session, daily quota, fleet health store | DB setup নেই; debug/backup/mount সহজ |
-| **asyncio** | Playwright ও HTTP এক process-এ concurrent | Playwright Python async-native |
-| **setuptools / pyproject.toml** | `playwright_automation` package install | `scripts/` থেকে clean import |
+| Technology | এখানে কী করে | কেন এটা |
+|------------|-------------|---------|
+| **Python 3.10+** | সব script + library | automation, async, দ্রুত change — dev-friendly |
+| **Playwright + Chromium** | real browser চালায় | Facebook-এ feed/comment/share-এর public API নেই |
+| **playwright-stealth** | `webdriver` ইত্যাদি লুকায় | সোজা Playwright-এ bot signal বেশি |
+| **Custom stealth scripts** | canvas/WebGL noise | mobile Facebook-এ extra সুরক্ষা |
+| **httpx** | Ollama, Gemini, webhook call | async loop-এ `requests`-এর চেয়ে সুবিধা |
+| **python-dotenv** | `.env` থেকে config load | password/code-এ না রেখে আলাদা ফাইল |
+| **tzdata** | browser timezone (`Asia/Dhaka`) | Windows-এ timezone data কম থাকে |
+| **truststore + certifi** | Gemini HTTPS ঠিক রাখে | office proxy / Windows-এ SSL error কমায় |
+| **local Ollama + llama3.1:8b** | সিদ্ধান্ত + comment + post | PC-তে চলে, cloud bill নেই, দ্রুত |
+| **Google Gemini** | Ollama fail হলে backup text | comment/caption বন্ধ হবে না |
+| **Docker + Compose** | account প্রতি container | server-এ scale করা সহজ |
+| **JSON (`profiles/`)** | session, quota, status save | DB লাগে না, ফাইল খুলে দেখা যায় |
+| **asyncio** | browser + HTTP একসাথে | Playwright Python async-ই |
+| **pyproject.toml** | package install | import clean থাকে |
 
-### ৪.২ বিস্তারিত
+### ৪.২ একটু বিস্তারিত
 
-#### Python 3.10+
+#### Python
 
-- **কাজ:** `scripts/`, `playwright_automation/`, fleet launcher, Docker entrypoint।
-- **Node.js কেন নয়?** Playwright দুটোতেই আছে, কিন্তু long-running loop + JSON quota + LLM client এক codebase-এ Python সুবিধাজনক।
-- **Java/C# কেন নয়?** DOM heuristic ও prompt পরিবর্তনে iteration ধীর।
+- সব logic Python-এ — `scripts/` আর `playwright_automation/`।
+- Node-ও Playwright দেয়, কিন্তু long loop + JSON quota + LLM call এক জায়গায় Python-এ manage করা সহজ।
+- Java/C#-তে DOM selector বদলাতে সময় বেশি লাগে।
 
 #### Playwright + Chromium
 
-- **কাজ:** `bot_core.py` persistent context; `actions.py` সব Facebook UI step।
-- **Handles:** navigation, selectors, mobile viewport, proxy, `storage_state.json`।
-- **Selenium কেন নয়?** auto-wait, persistent context, modern API, stealth path ভালো।
-- **Chromium কেন?** Facebook Chrome/Chromium-এ heavily tested।
+- `bot_core.py` browser খোলে, `actions.py` Facebook-এ click/type করে।
+- Selenium-এর চেয়ে auto-wait ভালো, session save সহজ, stealth path পরিষ্কার।
+- Facebook মূলত Chrome/Chromium-এ test করা — তাই Chromium।
 
-#### playwright-stealth + custom scripts
+#### stealth
 
-- **কাজ:** `stealth_config.py` — library patch + page load-এর আগে init scripts।
-- **দুটো কেন?** library common leak ঢেকে; custom scripts fleet bot-এ extra variation।
+- `stealth_config.py` library patch + নিজের init script inject করে।
+- library এক lone, custom script fleet-এ আলাদা fingerprint দেয়।
 
 #### httpx
 
-- **কাজ:** `brain.py` → Ollama; `ai_comment.py` → Gemini; `fleet_status.py` → webhook।
-- **`urllib` কেন নয়?** async ও timeout/error handling fleet throttling-এ দরকার।
+- `brain.py` → local Ollama, `ai_comment.py` → Gemini, `fleet_status.py` → webhook।
+- fleet-এ timeout/retry দরকার — httpx-এ handle করা সহজ।
 
 #### python-dotenv
 
-- **কাজ:** project-root `.env` load।
-- **hard-code কেন নয়?** dev PC, Docker host, fleet server — আলাদা Ollama/proxy/key, code change ছাড়াই।
+- dev PC, Docker host, server — তিন জায়গায় আলাদা Ollama address/proxy/key; code touch না করেই `.env` বদলাও।
 
-#### tzdata
+#### local Ollama (llama3.1:8b)
 
-- **কাজ:** CLI `--timezone` (ডিফল্ট `Asia/Dhaka`)।
-- **কেন?** system TZ vs Facebook session TZ mismatch detection signal হতে পারে।
+- brain mode-এর main AI — JSON action, বাংলা/ইংরেজি comment, status post।
+- cloud-এ পাঠালে prompt যায় বাইরে + টাকা লাগে; local-এ PC-তেই থাকে।
+- `8b` model — ৮–১৬ GB RAM-এ চলে, quality/speed balance ঠিক আছে।
+- ৫০০+ bot scale-এ শুধু OpenAI expensive হবে।
 
-#### truststore + certifi
+#### Gemini (optional)
 
-- **কাজ:** Windows/MITM proxy-তে Gemini HTTPS SSL।
-- **কেন?** Windows Python cert store কখনো browser TLS-এর মতো কাজ করে না।
+- Ollama down বা slow হলে comment/caption Gemini দিয়ে।
+- structured fleet mode-এ LLM কম লাগে — Gemini must না।
 
-#### Ollama (llama3.1:8b)
+#### Docker
 
-- **কাজ:** primary brain — JSON decision, বাংলা/ইংরেজি comment, trending status।
-- **local LLM কেন?** privacy, API billing নেই, Facebook ছাড়া slow internet-এও চলে।
-- **llama3.1:8b কেন?** 8–16 GB RAM-এ speed/quality balance; fleet-এ shared GPU-তে manageable।
-- **শুধু OpenAI কেন নয়?** 500+ bot scale-এ cost ও external uptime dependency।
+- এক container = এক account, `FLEET_MODE=1`, headless, `profiles/` mount।
+- ছোট scale-এ Compose enough; বড় scale-এ K8s — `FLEET_SCALING.md` দেখো।
 
-#### Google Gemini (ঐচ্ছিক)
+#### JSON, database না
 
-- **কাজ:** Ollama error/timeout-এ `ai_comment.py` fallback।
-- **ঐচ্ছিক কেন?** structured fleet mode minimal LLM-এ চলতে পারে।
+- account প্রতি আলাদা folder, join/query দরকার নেই।
+- debug: `cat profiles/xxx/daily_friend_quota.json` — done।
+- analytics weak — fleet `--status` JSON গুলো aggregate করে।
 
-#### Docker + Docker Compose
+### ৪.৩ `requirements.txt` — package গুলো
 
-- **কাজ:** `Dockerfile`, `docker-compose.yml`, generated fleet compose।
-- **দেয়:** per-account `ACCOUNT_ID`, `FLEET_MODE=1`, headless structured agent, `profiles/` volume।
-- **শুধু K8s কেন নয়?** Phase 1–2-তে Compose যথেষ্ট; Phase 3-তে K8s — `FLEET_SCALING.md`।
+| Package | কাজ |
+|---------|-----|
+| `playwright` | browser automation |
+| `playwright-stealth` | detection কমানো |
+| `httpx` | Ollama, Gemini, webhook |
+| `tzdata` | timezone |
+| `python-dotenv` | `.env` load |
+| `truststore`, `certifi` | SSL fix |
 
-#### JSON persistence (ডাটাবেস নেই)
+### ৪.৪ যা **ইচ্ছে করে** use করিনি
 
-- **কাজ:** `profiles/<account_id>/` — quota, cookies, fleet status।
-- **PostgreSQL/SQLite কেন নয়?** account প্রতি single-writer, join নেই; `cat` দিয়ে debug সহজ।
-- **trade-off:** centralized analytics weak; fleet `--status` JSON aggregate করে।
-
-#### asyncio
-
-- **কাজ:** `asyncio.run()`; page action ও Ollama call block না করে interleave।
-- **threaded Selenium কেন নয়?** reasoning কঠিন; Playwright Python async-first।
-
-### ৪.৩ Dependencies (`requirements.txt`)
-
-| Package | Version | ব্যবহার |
-|---------|---------|---------|
-| `playwright` | ≥ 1.49.0 | Browser automation |
-| `playwright-stealth` | ≥ 2.0.0 | Anti-detection |
-| `httpx` | ≥ 0.27.0 | Ollama, Gemini, webhooks |
-| `tzdata` | ≥ 2024.1 | Timezone data |
-| `python-dotenv` | ≥ 1.0.0 | `.env` load |
-| `truststore` | ≥ 0.10.0 | OS trust store TLS |
-| `certifi` | ≥ 2024.7.4 | CA bundle fallback |
-
-### ৪.৪ যা ইচ্ছাকৃতভাবে ব্যবহার করা হয়নি
-
-| ব্যবহার হয়নি | কারণ |
-|--------------|------|
-| Facebook Graph API | logged-in user-এর মতো feed/friend/composer access নেই |
-| FastAPI / Flask | HTTP server দরকার নেই; CLI + subprocess fleet যথেষ্ট |
-| PostgreSQL / Redis | per-bot JSON state যথেষ্ট; ops overhead এড়ায় |
-| Selenium | Playwright persistence ও stealth ভালো |
-| শুধু cloud LLM | brain mode-এ cost ও latency বেশি |
+| নাই | কেন |
+|-----|-----|
+| Facebook Graph API | logged-in user-এর মতো feed/friend UI access মেলে না |
+| FastAPI / Flask | server দরকার নেই — CLI যথেষ্ট |
+| PostgreSQL / Redis | JSON file-ই enough, setup কম |
+| Selenium | Playwright এ project-এ better fit |
+| শুধু cloud LLM | brain mode-এ cost + latency বেশি |
 
 ---
 
-## ৫. প্রজেক্ট স্ট্রাকচার
+## ৫. ফোল্ডার ও ফাইল
 
 ```
 bot-agent/
 ├── README.md
-├── pyproject.toml                 # Package: facebook-agent 0.2.0
+├── pyproject.toml
 ├── requirements.txt
 ├── .env.example
 ├── Dockerfile
 ├── docker-compose.yml
 │
 ├── docs/
-│   ├── SYSTEM_DESIGN_EN.md        # ইংরেজি সংস্করণ
-│   ├── SYSTEM_DESIGN_BN.md        # এই ডকুমেন্ট
+│   ├── SYSTEM_DESIGN_EN.md
+│   ├── SYSTEM_DESIGN_BN.md    ← তুমি এখানে
 │   └── FLEET_SCALING.md
 │
-├── playwright_automation/         # মূল লাইব্রেরি
-│   ├── account_registry.py
-│   ├── account_session.py
-│   ├── actions.py
-│   ├── agent_brain.py
-│   ├── agent_executor.py
-│   ├── ai_comment.py
-│   ├── bot_core.py
-│   ├── brain.py
-│   ├── browser_profile.py
-│   ├── facebook_graph.py
-│   ├── facebook_login.py
-│   ├── fleet_status.py
-│   ├── human_behavior.py
-│   ├── post_engagement.py
-│   ├── profile_engagement.py
-│   ├── stealth_config.py
-│   └── user_agent_rotation.py
-│
-├── scripts/                       # CLI এন্ট্রি পয়েন্ট
-│   ├── run_agent_brain.py         # ★ মূল agent runner
-│   ├── send_one_friend.py
-│   ├── fleet_launcher.py
-│   ├── check_ollama.py
-│   └── ...
-│
-├── accounts/                      # Credentials (gitignored)
-└── profiles/                      # Runtime state (gitignored)
+├── playwright_automation/     ← মূল library
+├── scripts/                   ← command গুলো
+├── accounts/                  ← login info (git-এ যাবে না)
+└── profiles/                  ← runtime data (git-এ যাবে না)
     └── <account_id>/
         ├── storage_state.json
         ├── daily_*_quota.json
@@ -343,145 +295,137 @@ bot-agent/
 
 ---
 
-## ৬. মূল কম্পোনেন্ট
+## ৬. মূল মডিউলগুলো
 
-### ৬.১ `BaseBot` (`bot_core.py`)
+### `BaseBot` — browser খোলা
 
-- প্রতি অ্যাকাউন্টে **persistent Chromium context** তৈরি করে।
-- Proxy, user-agent rotation, stealth scripts, timezone প্রয়োগ করে।
-- `storage_state.json` load/save করে কুকি persistence রাখে।
+- account প্রতি আলাদা Chromium profile।
+- proxy, random user-agent, stealth, timezone set করে।
+- cookie `storage_state.json`-এ save/load।
 
-### ৬.২ `AgentSession` (`agent_executor.py`)
+### `AgentSession` — cycle চালানো
 
-- Runtime state: feed memory snippets, quota counters, cycle metadata।
-- প্রতিটি Ollama সিদ্ধান্তের জন্য `agent_step()` execute করে।
-- Structured cycles ও daily phases (friend, post, share) চালায়।
+- feed memory, quota count, cycle info রাখে।
+- Ollama যা বলে (`agent_step`) সেটা browser-এ execute করে।
+- friend / post / share phase চালায়।
 
-### ৬.৩ `AgentDecision` (`agent_brain.py`)
-
-Ollama strict JSON দিয়ে পরবর্তী action বলে:
+### `AgentDecision` — Ollama কী বলে
 
 ```json
 {
   "action": "comment_post",
   "location": "newsfeed",
-  "thought_process": "এই পোস্টে স্থানীয় রাজনীতি নিয়ে আলোচনা..."
+  "thought_process": "এই পোস্টে রাজনীতি নিয়ে কথা..."
 }
 ```
 
-### ৬.৪ `Brain` (`brain.py`)
+### `Brain` — local Ollama-র সাথে কথা
 
-- Ollama `/api/chat` ও `/api/tags`-এর HTTP client।
-- Fleet throttling: `FLEET_OLLAMA_MIN_INTERVAL_SEC` দিয়ে shared Ollama overload এড়ায়।
+- `/api/chat` call করে।
+- fleet-এ অনেক bot এক Ollama share করলে `FLEET_OLLAMA_MIN_INTERVAL_SEC` gap দেয় — overload কমায়।
 
-### ৬.৫ `ai_comment.py`
+### `ai_comment.py` — text বানানো
 
-- কমেন্ট, share caption, status post generate করে।
-- Primary: Ollama। Fallback: Gemini API।
-- `STATUS_BN_RATIO` দিয়ে বাংলা/ইংরেজি ভাষা নিয়ন্ত্রণ।
+- comment, share caption, status post।
+- আগে local Ollama, না হলে Gemini।
+- `STATUS_BN_RATIO` — কতটা বাংলা, কতটা ইংরেজি post।
 
 ---
 
-## ৭. রান মোড ও কন্ট্রোল ফ্লো
+## ৭. চালানোর দুটো মোড
 
-### ৭.১ Brain mode (ডিফল্ট)
+### Brain mode (default)
 
-প্রতিটি **সাইকেল**:
+প্রতি cycle-এ roughly:
 
-1. **Friend phase** (কোটা বাকি): ১৫–২৫ suggestion row stalk, ১২–২৮ সেকেন্ড browse, অডিয়েন্স ≥ ২০০০ হলে request। **সাইকেলে ১**, **দিনে ৩–৪**।
-2. **Status post phase** (কোটা বাকি): ফিড স্ক্রল, snippet জমা, trending topic, পোস্ট publish।
-3. **Ollama steps** (ডিফল্ট ৬–৮): observe → JSON → execute।
-4. **Share top-up** — দৈনিক ২০ শেয়ার পূরণ না হলে।
-5. বিরতি, state save, আবার শুরু।
+1. **Friend** — কোটা বাকি থাকলে suggestion থেকে profile দেখে, ২০০০+ হলে request (cycle-এ max ১, দিনে ৩–৪)।
+2. **Status post** — ফিড scroll, topic বের, post।
+3. **Ollama steps** — ৬–৮ বার: page দেখে → JSON → execute।
+4. **Share** — দিনে ২০টা না হলে আরো share।
+5. একটু wait, save, আবার শুরু।
 
-Ollama offline হলে offline fallback (scroll + সাধারণ engagement)।
+Ollama বন্ধ থাকলে simple scroll/like fallback চলে।
 
-### ৭.২ Structured mode (`--mode structured`)
+### Structured mode (`--mode structured`)
 
-নির্দিষ্ট pipeline — কম LLM load, fleet launcher ও Docker-এ ব্যবহৃত:
+fixed ক্রম — LLM কম লাগে, fleet/Docker-এ default:
 
-1. Friend send + accept (ঐচ্ছিক)
-2. Feed rounds: scroll → like → comment → share
+1. Friend send (+ accept)
+2. Feed: scroll → like → comment → share
 3. Status post
 
-### ৭.৩ Brain cycle flowchart
+### Cycle flow (brain mode)
 
 ```mermaid
 flowchart TD
-    A[সাইকেল শুরু] --> B{Friend কোটা বাকি?}
-    B -->|হ্যাঁ| C[Random stalk suggestions]
+    A[cycle শুরু] --> B{friend quota বাকি?}
+    B -->|হ্যাঁ| C[suggestion browse]
     B -->|না| D
-    C --> D{Post কোটা বাকি?}
-    D -->|হ্যাঁ| E[ফিড স্ক্রল + trending post]
+    C --> D{post quota বাকি?}
+    D -->|হ্যাঁ| E[ফিড scroll + post]
     D -->|না| F
-    E --> F[Ollama steps x N]
-    F --> G{Share কোটা বাকি?}
-    G -->|হ্যাঁ| H[Timeline-এ share]
+    E --> F[Ollama steps]
+    F --> G{share quota বাকি?}
+    G -->|হ্যাঁ| H[share]
     G -->|না| I
-    H --> I[Save + pause]
+    H --> I[save + wait]
     I --> A
 ```
 
 ---
 
-## ৮. ডেটা ফ্লো ডায়াগ্রাম
+## ৮. ডেটা কীভাবে ঘুরে
 
-### ৮.১ একক action step (brain mode)
+### এক step (brain mode)
 
 ```mermaid
 sequenceDiagram
     participant R as run_agent_brain
     participant E as agent_executor
     participant B as agent_brain
-    participant O as Ollama
+    participant O as local Ollama
     participant A as actions
     participant F as Facebook
 
-    R->>E: agent_step(session, page)
-    E->>B: decide_next_action(state)
+    R->>E: agent_step()
+    E->>B: পরের action কী?
     B->>O: POST /api/chat
-    O-->>B: JSON AgentDecision
+    O-->>B: JSON
     B-->>E: AgentDecision
-    E->>A: page-এ action execute
-    A->>F: Playwright UI interaction
-    F-->>A: DOM updated
-    A-->>E: result
-    E-->>R: step complete
+    E->>A: browser-এ কর
+    A->>F: click/type
+    F-->>A: done
+    E-->>R: step শেষ
 ```
 
-### ৮.২ কমেন্ট generation ফ্লো
+### comment বানানো
 
 ```mermaid
 sequenceDiagram
     participant E as agent_executor
-    participant P as post_engagement
     participant AI as ai_comment
-    participant O as Ollama
+    participant O as local Ollama
     participant G as Gemini
-    participant A as actions
 
-    E->>P: pick_fresh_visible_post()
-    P-->>E: post snippet
-    E->>AI: generate_comment_for_post()
-    AI->>O: text generate
+    E->>AI: post দিয়ে comment চাই
+    AI->>O: generate
     alt Ollama fail
-        AI->>G: fallback generateContent
+        AI->>G: backup
     end
     AI-->>E: comment text
-    E->>A: comment_on_post(human typing)
 ```
 
 ---
 
-## ৯. অ্যাকাউন্ট ও সেশন ম্যানেজমেন্ট
+## ৯. অ্যাকাউন্ট ও লগইন
 
-### ৯.১ অ্যাকাউন্ট সোর্স (অগ্রাধিকার ক্রম)
+### account info কোথায়
 
-1. **`accounts/accounts.json`** (সুপারিশকৃত) — `id`, `password`, `cookies`, `proxy`
-2. **`accounts/<account_id>.env`** — per-account env ফাইল
-3. **Legacy `cookies.txt`** — প্রতি অ্যাকাউন্ট ৩ লাইন
+1. **`accounts/accounts.json`** — সবচেয়ে ভালো (id, password, cookies, proxy)
+2. **`accounts/<id>.env`** — account প্রতি আলাদা env
+3. **`cookies.txt`** — পুরনো format, ৩ লাইন per account
 
-### ৯.২ Legacy `cookies.txt` ফরম্যাট
+### `cookies.txt` format
 
 ```
 account_id
@@ -489,271 +433,258 @@ password
 c_user=...; xs=...; datr=...
 ```
 
-Migration:
+নতুন format-এ নিতে:
 
 ```bash
 python scripts/migrate_cookies_to_registry.py
 ```
 
-### ৯.৩ লগইন ফ্লো
+### login হল কী হয়
 
-1. `storage_state.json` load (যদি থাকে)
-2. Facebook-এ navigate — logged in কিনা চেক
-3. না হলে: cookies seed বা `stealthy_facebook_login()`
-4. Checkpoint detect হলে: ৩০ মিনিট manual completion wait (`--fleet-mode`-এ skip)
+1. আগে save করা `storage_state.json` load
+2. Facebook খুলে logged in কিনা দেখে
+3. না হলে cookie দিয়ে বা password login
+4. **checkpoint** (Facebook verify চায়) — সাধারণ mode-এ ৩০ মিনিট wait; `--fleet-mode`-এ skip
 
-### ৯.৪ Proxy
-
-`accounts.json`, `PROXY_URL` env, বা `--proxy` CLI:
+### proxy
 
 ```
 http://user:pass@host:port
 ```
 
+`accounts.json`, `.env`-এ `PROXY_URL`, বা `--proxy` flag — যেকোনো একটা।
+
 ---
 
-## ১০. স্টেট persistence ও দৈনিক কোটা
+## ১০. কোথায় কী save হয় + daily limit
 
-সব স্টেট `profiles/<account_id>/`-এ:
+`profiles/<account_id>/` folder:
 
-| ফাইল | উদ্দেশ্য |
+| ফাইল | কী রাখে |
 |------|---------|
-| `storage_state.json` | Chromium cookies + localStorage |
-| `daily_friend_quota.json` | Friend request (৩–৪/দিন) |
-| `daily_post_quota.json` | Status post (৩–৫/দিন) |
-| `daily_share_quota.json` | Share (২০/দিন) |
-| `fleet_status.json` | Bot state, PID, errors, checkpoint |
-| `browser/` | Chromium user data directory |
+| `storage_state.json` | cookie, localStorage |
+| `daily_friend_quota.json` | আজ কত friend পাঠিয়েছে (limit ৩–৪) |
+| `daily_post_quota.json` | আজ কত post (limit ৩–৫) |
+| `daily_share_quota.json` | আজ কত share (limit ২০) |
+| `fleet_status.json` | bot চলছে কিনা, error, checkpoint |
+| `browser/` | Chromium profile data |
 
-### দৈনিক কোটা (ডিফল্ট)
+| কাজ | দিনে default |
+|-----|-------------|
+| Friend request | ৩–৪ |
+| Status post | ৩–৫ |
+| Share | ২০ |
+| Feed (like/comment) | limit নেই, cycle জুড়ে |
 
-| কার্যকলাপ | ডিফল্ট কোটা | নোট |
-|-----------|-------------|------|
-| Friend request | ৩–৪ / দিন | ≥ ২০০০ friends/followers |
-| Status post | ৩–৫ / দিন | Feed memory থেকে topic |
-| Share | ২০ / দিন | Human-typed caption |
-| Feed engagement | Continuous | Like, comment, share |
-
-কোটা প্রতিদিন calendar date অনুযায়ী reset হয়।
+নতুন দিন শুরু হলে quota JSON reset হয়।
 
 ---
 
-## ১১. AI ও LLM integration
+## ১১. AI / LLM কীভাবে কাজে লাগে
 
-### ১১.১ Task routing
+| কাজ | আগে | backup |
+|-----|-----|--------|
+| পরের action | local Ollama | offline scroll/like |
+| comment | local Ollama | Gemini |
+| share caption | local Ollama | Gemini |
+| status post | local Ollama | skip |
+| follower count | DOM parse | Ollama |
 
-| কাজ | Primary | Fallback |
-|-----|----------|----------|
-| পরবর্তী action | Ollama | Offline scroll/like |
-| কমেন্ট | Ollama | Gemini API |
-| Share caption | Ollama | Gemini API |
-| Status post | Ollama | Skip |
-| Profile audience | DOM parsing | Ollama text read |
+### local Ollama setup
 
-### ১১.২ Ollama কনফিগ
-
-| Variable | Default |
+| Variable | default |
 |----------|---------|
 | `OLLAMA_HOST` | `127.0.0.1:11434` |
-| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` |
 | `OLLAMA_MODEL` | `llama3.1:8b` |
 
-চেক:
+চালু আছে কিনা:
 
 ```bash
 python scripts/check_ollama.py
 ```
 
-### ১১.৩ Gemini fallback
+### Gemini
 
-Ollama fail হলে comment/caption-এ ব্যবহৃত। `.env`-এ `GEMINI_API_KEY` সেট করুন।
+Ollama fail হলে comment/caption-এ। `.env`-এ `GEMINI_API_KEY` দাও।
 
-### ১১.৪ Fleet LLM throttling
+### fleet + একটা Ollama
 
-অনেক বট এক Ollama share করলে `FLEET_OLLAMA_MIN_INTERVAL_SEC` (ডিফল্ট ৮s) API call-এর মধ্যে gap রাখে।
-
----
-
-## ১২. ব্রাউজার অটোমেশন ও স্টেলথ
-
-| বৈশিষ্ট্য | Implementation |
-|----------|----------------|
-| Persistent profile | অ্যাকাউন্টভিত্তik Chromium user data |
-| Viewport | Mobile 360×800 (ডিফল্ট) বা desktop |
-| User agent | `user_agent_rotation.py` দিয়ে random |
-| Stealth | playwright-stealth + canvas/WebGL noise |
-| Mouse | Bezier curves |
-| Scroll | Segment-based human scroll |
-| Typing | Typo, backspace, pause — `human_behavior.py` |
+অনেক bot এক PC-র Ollama share করলে `FLEET_OLLAMA_MIN_INTERVAL_SEC=8` — call-এর মাঝে gap, নাহলে overload।
 
 ---
 
-## ১৩. Facebook কার্যকলাপ ফ্লো
+## ১২. ব্রাউজার automation ও bot ধরা পড়া এড়ানো
 
-### ১৩.১ Friend request ফ্লো
+| জিনিস | কী করা হয় |
+|--------|-----------|
+| Profile | account প্রতি আলাদা Chromium data |
+| Screen | default mobile 360×800 |
+| User-agent | random rotate |
+| Stealth | playwright-stealth + canvas noise |
+| Mouse | Bezier curve — সোজা line না |
+| Scroll | segment scroll — এক ধাক্কায় না |
+| Typing | typo, backspace, pause — `human_behavior.py` |
 
-1. Friend suggestions page খোলা
-2. ৫ বার হালকা scroll
-3. Random suggestion row click (mobile-safe)
-4. Profile ১২–২৮ সেকেন্ড browse
-5. Friends/followers count (DOM + Ollama)
+`.env`-এ `HUMAN_TYPO_RATE`, `HUMAN_RETHINK_RATE` দিয়ে tuning।
+
+---
+
+## ১৩. Facebook-এ কী কী করে
+
+### Friend request
+
+1. Suggestions page
+2. হালকা scroll
+3. random row click
+4. profile ১২–২৮ sec দেখা
+5. follower count — DOM বা Ollama
 6. ≥ ২০০০ হলে Add Friend
-7. দৈনিক cap-এ থামা
+7. daily limit পূর্ণ হলে stop
 
-Utility: `python scripts/send_one_friend.py`
+শুধু friend: `python scripts/send_one_friend.py`
 
-### ১৩.২ Status post ফ্লো
+### Status post
 
-1. Feed scroll → snippet জমা
-2. Ollama দিয়ে trending topic
-3. মূল মতামত লেখা
-4. Composer-এ human-type করে publish
+1. feed scroll → text snippet জমা
+2. local Ollama topic বের করে
+3. নিজের মতো লেখা (copy-paste generic না)
+4. composer-এ type করে post
 
-২টির কম snippet থাকলে skip।
+২টার কম snippet থাকলে skip।
 
-### ১৩.৩ Share ফ্লো
+### Share
 
-1. Feed post বাছাই (stories/reels skip)
-2. Ollama/Gemini caption
-3. Human typing — typo, backspace, pause
-4. Confirm → feed-এ ফিরে যাওয়া
+1. feed থেকে post বাছাই (story/reel skip)
+2. local Ollama বা Gemini caption
+3. মানুষের মতো type (typo, pause)
+4. confirm → feed-এ ফিরে যাও
 
 ---
 
-## ১৪. Fleet ও Docker ডিপ্লয়মেন্ট
+## ১৪. অনেক বট একসাথে (fleet + Docker)
 
-### ১৪.১ Host-based fleet
+### PC-তে fleet (`fleet_launcher.py`)
 
-- `accounts.json` থেকে প্রতি অ্যাকাউন্টে একটি subprocess
-- Staggered startup (৩০–১২০s gap)
-- Crash-এ auto-restart
-- `--status` → সব `fleet_status.json` পড়ে
+- `accounts.json` থেকে account প্রতি এক process
+- start-এ ৩০–১২০ sec gap — একসাথে সব খুললে load বেশি
+- crash হলে restart
+- `python scripts/fleet_launcher.py --status` — সব bot-এর health
 
-Phase limits:
+| Phase | max bot | কখন |
+|-------|---------|------|
+| 1 | 10 | নিজের PC-তে test |
+| 2 | 50 | একটা server |
+| 3 | 600 | অনেক machine |
 
-| Phase | Max bots | ব্যবহার |
-|-------|----------|---------|
-| 1 | 10 | এক PC-তে verify |
-| 2 | 50 | Single server |
-| 3 | 600 | Distributed |
+### Docker
 
-```bash
-python scripts/fleet_launcher.py --max-bots 10 --phase 1
-python scripts/fleet_launcher.py --status
-```
+container প্রতি:
 
-### ১৪.২ Docker fleet
-
-প্রতি container-এ:
-
-- `FLEET_MODE=1` (headless, manual checkpoint wait নেই)
-- `--mode structured` (Docker ডিফল্ট)
-- Staggered startup
-- Host `profiles/` mount
+- `FLEET_MODE=1` — headless, checkpoint wait না
+- `--mode structured` — কম LLM
+- `profiles/` volume mount — session থাকে
 
 ```bash
 docker compose up --build bot1 bot2 bot3
-python scripts/generate_compose_services.py --count 10
 ```
 
-বিস্তারিত: [FLEET_SCALING.md](FLEET_SCALING.md)
+বিস্তারিত RAM/CPU: [FLEET_SCALING.md](FLEET_SCALING.md)
 
-### ১৪.৩ Fleet monitoring
+### monitoring
 
-`fleet_status.py` health JSON লেখে। `FLEET_ALERT_WEBHOOK` checkpoint/crash-এ alert পাঠায়।
-
----
-
-## ১৫. বাহ্যিক integration
-
-| সেবা | প্রোটোকল | ব্যবহার |
-|------|----------|---------|
-| **Ollama** | HTTP `/api/chat` | Primary LLM |
-| **Google Gemini** | HTTPS | Comment/caption fallback |
-| **Facebook** | Browser (Playwright) | সব social action UI দিয়ে |
-| **HTTP Proxy** | Playwright proxy | Per-account IP isolation |
-| **Webhook** | HTTP POST JSON | Fleet alerts |
+`fleet_status.json` + optional `FLEET_ALERT_WEBHOOK` — checkpoint/crash হলে notify।
 
 ---
 
-## ১৬. কনফিগারেশন রেফারেন্স
+## ১৫. বাইরের service গুলো
 
-`.env.example` → `.env` কপি করুন।
+| Service | কীভাবে | কেন |
+|---------|--------|-----|
+| **local Ollama** | HTTP `/api/chat` | main AI |
+| **Gemini** | HTTPS | text backup |
+| **Facebook** | Playwright browser | সব UI action |
+| **Proxy** | Playwright proxy | account প্রতি আলাদা IP |
+| **Webhook** | POST JSON | fleet alert |
 
-### AI / LLM
+---
 
-| Variable | Default | উদ্দেশ্য |
-|----------|---------|---------|
-| `OLLAMA_HOST` | `127.0.0.1:11434` | Ollama host:port |
-| `OLLAMA_MODEL` | `llama3.1:8b` | Model name |
-| `GEMINI_API_KEY` | (empty) | Gemini fallback |
+## ১৬. `.env` ও config
+
+`.env.example` copy করে `.env` বানাও।
+
+### AI
+
+| Variable | default | মানে |
+|----------|---------|------|
+| `OLLAMA_HOST` | `127.0.0.1:11434` | local Ollama কোথায় |
+| `OLLAMA_MODEL` | `llama3.1:8b` | কোন model |
+| `GEMINI_API_KEY` | empty | backup API key |
 
 ### Facebook behaviour
 
-| Variable | Default | উদ্দেশ্য |
-|----------|---------|---------|
-| `MIN_AUDIENCE_FRIEND_REQUEST` | `2000` | Friend send-এর min audience |
-| `HUMAN_TYPO_RATE` | `0.045` | Typo probability |
-| `STATUS_BN_RATIO` | `0.65` | বাংলা vs ইংরেজি status ratio |
+| Variable | default | মানে |
+|----------|---------|------|
+| `MIN_AUDIENCE_FRIEND_REQUEST` | `2000` | কম follower হলে friend দেবে না |
+| `STATUS_BN_RATIO` | `0.65` | post-এর ~৬৫% বাংলা |
 
-### Fleet / Docker
+### Fleet
 
-| Variable | Default | উদ্দেশ্য |
-|----------|---------|---------|
-| `FLEET_MODE` | `0` | Headless fleet worker |
+| Variable | default | মানে |
+|----------|---------|------|
+| `FLEET_MODE` | `0` | `1` = headless worker |
 | `FLEET_OLLAMA_MIN_INTERVAL_SEC` | `8.0` | Ollama call gap |
-| `FLEET_ALERT_WEBHOOK` | (empty) | Alert webhook |
-| `PROXY_URL` | — | Proxy override |
+| `FLEET_ALERT_WEBHOOK` | empty | alert URL |
+| `PROXY_URL` | — | proxy override |
 
 ---
 
-## ১৭. CLI এন্ট্রি পয়েন্ট
+## ১৭. কোন command কী করে
 
-| কমান্ড | উদ্দেশ্য |
-|--------|---------|
-| `python scripts/run_agent_brain.py` | **মূল agent** |
-| `python scripts/send_one_friend.py` | শুধু friend request |
-| `python scripts/fleet_launcher.py` | Nটি bot subprocess |
-| `python scripts/fleet_launcher.py --status` | Fleet health |
-| `python scripts/check_ollama.py` | Ollama verify |
-| `python scripts/unlock_browser_profile.py --kill-chrome` | Profile lock fix |
+| Command | কাজ |
+|---------|-----|
+| `python scripts/run_agent_brain.py` | **main** — agent চালু |
+| `python scripts/send_one_friend.py` | শুধু friend |
+| `python scripts/fleet_launcher.py` | অনেক bot |
+| `python scripts/fleet_launcher.py --status` | health check |
+| `python scripts/check_ollama.py` | local Ollama OK? |
+| `python scripts/unlock_browser_profile.py --kill-chrome` | profile lock fix |
 
-### মূল CLI flags
+### useful flags
 
-| Flag | Default | উদ্দেশ্য |
-|------|---------|---------|
-| `--mode` | `brain` | `brain` বা `structured` |
-| `--account-id` | env | Account ID |
-| `--proxy` | env | HTTP proxy |
-| `--fleet-mode` | off | Worker mode |
-| `--headless` | off | Headless Chromium |
-| `--skip-friends` | off | Friend activity skip |
-
----
-
-## ১৮. নিরাপত্তা ও অপারেশনাল নোট
-
-- **Credentials** — `.env`, `accounts.json`, `cookies.txt` commit করবেন না (gitignored)।
-- **Proxy** — Fleet-এ প্রতি অ্যাকাউন্টে আলাদা residential/mobile proxy ব্যবহার করুন।
-- **Checkpoint** — Facebook manual verification চাইতে পারে; non-fleet mode-এ agent wait করে।
-- **Rate limits** — দৈনিক কোটা intentionally conservative; সাবধানে adjust করুন।
-- **Terms of Service** — Automated activity Facebook ToS লঙ্ঘন করতে পারে; দায় ব্যবহারকারীর।
+| Flag | default | মানে |
+|------|---------|------|
+| `--mode` | `brain` | `structured` = fixed pipeline |
+| `--account-id` | env | কোন account |
+| `--proxy` | env | proxy URL |
+| `--fleet-mode` | off | headless worker |
+| `--headless` | off | browser দেখাবে না |
+| `--skip-friends` | off | friend phase skip |
 
 ---
 
-## ১৯. সমস্যা সমাধান
+## ১৮. নিরাপত্তা — যা মাথায় রাখবেন
 
-| সমস্যা | সমাধান |
-|--------|---------|
-| Ollama unreachable | Ollama চালু; `OLLAMA_HOST=127.0.0.1:11434` |
+- `.env`, `accounts.json`, `cookies.txt` — **git-এ push করবেন না**।
+- fleet-এ account প্রতি **আলাদা proxy** ভালো।
+- Facebook checkpoint চাইলে manually verify করতে হতে পারে।
+- daily quota কম রাখা হয়েছে — বাড়ালে ban risk বাড়ে।
+- automated activity Facebook ToS লঙ্ঘন করতে পারে — **দায় তোমার**।
+
+---
+
+## ১৯. সমস্যা হলে কী করবেন
+
+| সমস্যা | করো |
+|--------|-----|
+| Ollama connect হয় না | Ollama app চালু? `OLLAMA_HOST=127.0.0.1:11434` |
 | Profile locked | `python scripts/unlock_browser_profile.py --kill-chrome` |
-| ০ friend send | Ollama + suggestions page চেক |
-| Status post নেই | আরো cycle — memory বাড়তে হবে (≥ ২ snippet) |
-| Checkpoint | Browser-এ manual verify; agent ৩০ মিনিট wait |
-| Fleet crash loop | `profiles/<id>/fleet_status.json` দেখুন |
+| Friend যাচ্ছে না | local Ollama + suggestions page load হচ্ছে? |
+| Post হচ্ছে না | আরো cycle চালাও — feed memory বাড়তে হবে (≥ ২ snippet) |
+| Checkpoint | browser-এ নিজে verify; agent ৩০ min wait |
+| Fleet crash loop | `profiles/<id>/fleet_status.json` পড়ো |
 
 ---
 
-*ডকুমেন্ট সংস্করণ: `facebook-agent` 0.2.0-এর সাথে মিল রেখে*
+*version: `facebook-agent` 0.2.0*
 
-*English version: [SYSTEM_DESIGN_EN.md](SYSTEM_DESIGN_EN.md)*
+*English: [SYSTEM_DESIGN_EN.md](SYSTEM_DESIGN_EN.md)*

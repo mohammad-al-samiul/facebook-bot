@@ -11,7 +11,7 @@
 | | |
 |---|---|
 | **English** | This project automates human-like Facebook activity for one account at a time (or many in fleet mode): feed engagement, status posts, friend requests, and session persistence — all driven by a local Ollama model. |
-| **বাংলা** | এই প্রজেক্ট স্থানীয় Ollama LLM দিয়ে Facebook-এ মানুষের মতো কার্যকলাপ (ফিড এনgage, স্ট্যাটাস পোস্ট, ফ্রেন্ড রিকোয়েস্ট) চালায়। একাধিক অ্যাকাউন্ট fleet বা Docker দিয়ে স্কেল করা যায়। |
+| **বাংলা** | PC-তে চলা **local Ollama** দিয়ে Facebook-এ মানুষের মতো কাজ করে — ফিডে লাইক/কমেন্ট/শেয়ার, স্ট্যাটাস পোস্ট, ফ্রেন্ড রিকোয়েস্ট। চাইলে fleet বা Docker-এ অনেক account একসাথে চালানো যায়। |
 
 **Version:** `0.2.0` · **Python:** 3.10+ · **Package:** `facebook-agent`
 
@@ -24,7 +24,7 @@ Full architecture, data flow, modules, and scaling guides:
 | Language | Document |
 |----------|----------|
 | **English** | [Whole Project System Design (English)](docs/SYSTEM_DESIGN_EN.md) |
-| **বাংলা** | [পুরো প্রজেক্ট সিস্টেম ডিজাইন (বাংলা)](docs/SYSTEM_DESIGN_BN.md) |
+| **বাংলা** | [সিস্টেম ডিজাইন — বাংলায়](docs/SYSTEM_DESIGN_BN.md) |
 
 Additional guide:
 
